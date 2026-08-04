@@ -38,6 +38,7 @@ cd "$R_SOURCE"
     --enable-R-shlib \
     --with-x=no \
     --disable-java \
+    --enable-strict-barrier \
     --without-recommended-packages
 
 make -j"$(nproc)"
@@ -80,8 +81,8 @@ fi
 # Generate minimal valid RDS files for the unserialize target.
 export R_HOME
 export LD_LIBRARY_PATH="$R_LIB_DIR:${LD_LIBRARY_PATH:-}"
-mkdir -p "$SEED_STAGE/fuzz_unserialize"
-( cd "$SEED_STAGE/fuzz_unserialize" && \
+mkdir -p "$SEED_STAGE/unserialize"
+( cd "$SEED_STAGE/unserialize" && \
   "$WORK/r-install/bin/Rscript" --vanilla -e '
     saveRDS(NULL, "null.rds")
     saveRDS(1L, "integer.rds")
@@ -98,16 +99,16 @@ mkdir -p "$SEED_STAGE/fuzz_unserialize"
 ########################################################################
 # 3. Compile, link, and package each fuzz target
 ########################################################################
-# Convention: each harnesses/fuzz_<name>.c is built into a target named
-# fuzz_<name>.  Optional sibling files, all keyed on that same name, are
+# Convention: each harnesses/<name>.c is built into a target named
+# <name>.  Optional sibling files, all keyed on that same name, are
 # picked up automatically -- no per-target wiring:
 #
-#   dictionaries/fuzz_<name>.dict  ->  $OUT/fuzz_<name>.dict
-#   options/fuzz_<name>.options    ->  $OUT/fuzz_<name>.options
-#   seeds/fuzz_<name>/             ->  $OUT/fuzz_<name>_seed_corpus.zip
+#   dictionaries/<name>.dict  ->  $OUT/<name>.dict
+#   options/<name>.options    ->  $OUT/<name>.options
+#   seeds/<name>/             ->  $OUT/<name>_seed_corpus.zip
 #
-# To add a target: drop a harnesses/fuzz_<name>.c (plus any of the above).
-for src in "$REPO"/harnesses/fuzz_*.c; do
+# To add a target: drop a harnesses/<name>.c (plus any of the above).
+for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
 
     $CC $CFLAGS -fno-omit-frame-pointer \

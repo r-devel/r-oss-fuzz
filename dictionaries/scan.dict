@@ -1,0 +1,75 @@
+#
+# AFL++ dictionary for scan / delimited text fuzzing.
+#
+# Field separators, quoting characters, escape sequences,
+# NA representations, numeric literals, and structural tokens
+# that exercise R's scan() text parser.
+#
+
+# Field separators
+","
+"\t"
+"|"
+";"
+" "
+
+# Quote characters
+"\""
+"'"
+
+# Line endings
+"\n"
+"\r"
+"\r\n"
+
+# Escape sequences
+"\\\""
+"\\\\"
+"\\n"
+"\\t"
+
+# NA representations
+"NA"
+"NaN"
+"na"
+"N/A"
+"null"
+"NULL"
+""
+"."
+
+# Comment characters
+"#"
+
+# Numeric values
+"0"
+"1"
+"-1"
+"3.14"
+"1e10"
+"Inf"
+"-Inf"
+"0x1f"
+"1+2i"
+
+# Logical values
+"TRUE"
+"FALSE"
+"T"
+"F"
+
+# Empty / edge cases
+",,"
+"\t\t"
+"\"\""
+"\"\"\""
+",\n"
+"\n,"
+"\n\n"
+
+# Long fields
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Unicode
+"\xc3\xa9"
+"\xe4\xb8\xad"

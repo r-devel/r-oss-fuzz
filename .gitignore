@@ -7,3 +7,7 @@
 # Editor / OS cruft
 *.swp
 .DS_Store
+
+# Local clangd config: R's include path is environment-specific.
+# Regenerate with:  printf -- '-I%s/include\n-DR_NO_REMAP=1\n' "$(R RHOME)" > compile_flags.txt
+compile_flags.txt

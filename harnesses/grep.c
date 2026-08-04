@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "fuzz_common.h"
+#include "common.h"
 
 #define FUZZ_MAX_INPUT (1024 * 64)
 

@@ -1,0 +1,75 @@
+#
+# AFL++ dictionary for memDecompress / compression fuzzing.
+#
+# Magic bytes, headers, and structural tokens for gzip, bzip2,
+# xz, and zlib compressed data formats.
+#
+
+# Gzip magic bytes and header fields
+"\x1f\x8b"
+"\x1f\x8b\x08"
+"\x1f\x8b\x08\x00"
+"\x1f\x8b\x08\x08"
+"\x1f\x8b\x08\x10"
+"\x1f\x8b\x08\x18"
+
+# Gzip compression method
+"\x08"
+
+# Gzip OS field values
+"\x00"
+"\x03"
+"\x07"
+"\x0b"
+"\xff"
+
+# Bzip2 magic bytes and header
+"\x42\x5a"
+"\x42\x5a\x68"
+"\x42\x5a\x68\x31"
+"\x42\x5a\x68\x39"
+
+# Bzip2 block header
+"\x31\x41\x59\x26\x53\x59"
+
+# Bzip2 end of stream
+"\x17\x72\x45\x38\x50\x90"
+
+# XZ magic bytes
+"\xfd\x37\x7a\x58\x5a\x00"
+"\xfd\x37\x7a"
+
+# XZ stream footer magic
+"\x59\x5a"
+
+# Zlib headers (used in gzip internals)
+"\x78\x01"
+"\x78\x5e"
+"\x78\x9c"
+"\x78\xda"
+
+# Deflate block types
+"\x01"
+"\x00"
+"\x03"
+
+# Common compressed data bytes
+"\x00\x00\x00\x00"
+"\xff\xff\xff\xff"
+"\x00\x00\xff\xff"
+
+# CRC/checksum patterns
+"\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# Size fields (little-endian)
+"\x00\x00\x00\x00"
+"\x01\x00\x00\x00"
+"\xff\xff\xff\x7f"
+"\xff\xff\xff\xff"
+
+# Truncation probes (partial headers)
+"\x1f"
+"\x42"
+"\xfd"
+"\xfd\x37"
+"\x42\x5a\x68\x39\x31"

@@ -1,0 +1,1 @@
+[^[:alpha:][:digit:][:space:][:punct:]]

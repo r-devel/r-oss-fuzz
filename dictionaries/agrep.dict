@@ -1,0 +1,80 @@
+#
+# AFL++ dictionary for approximate string matching (agrep) fuzzing.
+#
+# Tokens useful for TRE's approximate matching engine: literal strings,
+# regex metacharacters (for fixed=FALSE mode), and edit-distance
+# interesting patterns.
+#
+
+# Simple words (match targets)
+"hello"
+"world"
+"foo"
+"bar"
+"baz"
+"quick"
+"brown"
+"fox"
+"lazy"
+"dog"
+
+# Substrings of test strings
+"hell"
+"ello"
+"orld"
+"the "
+"over"
+"jump"
+
+# Single characters
+"a"
+"b"
+"z"
+" "
+
+# Repeated characters (interesting for edit distance)
+"aaa"
+"aaaa"
+"aaaaa"
+"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+"abababab"
+
+# Regex metacharacters (for fixed=FALSE path)
+"."
+"*"
+"+"
+"?"
+"["
+"]"
+"("
+")"
+"|"
+"^"
+"$"
+"\\"
+
+# Character classes
+"[a-z]"
+"[A-Z]"
+"[0-9]"
+"[[:alpha:]]"
+"[[:digit:]]"
+
+# Regex patterns
+".*"
+".+"
+"a|b"
+"(ab)+"
+"[abc]+"
+
+# Edge cases
+""
+" "
+"\t"
+"\n"
+"\x00"
+
+# Unicode
+"\xc3\xa9"
+"\xe4\xb8\xad"
+"\xf0\x9f\x98\x80"
