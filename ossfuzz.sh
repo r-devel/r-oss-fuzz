@@ -78,22 +78,33 @@ if [ -d "$REPO/seeds" ]; then
     cp -a "$REPO/seeds/." "$SEED_STAGE/"
 fi
 
-# Generate minimal valid RDS files for the unserialize target.
+# Generate minimal valid RDS files for the unserialize target.  The harness
+# passes bytes straight to unserialize(), which expects the raw serialization
+# stream, so the seeds must be written with compress = FALSE (saveRDS
+# gzip-compresses by default, and unserialize() rejects gzip data outright).
+# Emit binary v3, binary v2, and ASCII variants to seed those format branches.
 export R_HOME
 export LD_LIBRARY_PATH="$R_LIB_DIR:${LD_LIBRARY_PATH:-}"
 mkdir -p "$SEED_STAGE/unserialize"
 ( cd "$SEED_STAGE/unserialize" && \
   "$WORK/r-install/bin/Rscript" --vanilla -e '
-    saveRDS(NULL, "null.rds")
-    saveRDS(1L, "integer.rds")
-    saveRDS(3.14, "real.rds")
-    saveRDS("hello", "string.rds")
-    saveRDS(TRUE, "logical.rds")
-    saveRDS(1:10, "intvec.rds")
-    saveRDS(list(a=1, b="x"), "list.rds")
-    saveRDS(as.raw(0:255), "raw.rds")
-    saveRDS(1+2i, "complex.rds")
-    saveRDS(data.frame(x=1:3), "dataframe.rds")
+    objs <- list(
+      null      = NULL,
+      integer   = 1L,
+      real      = 3.14,
+      string    = "hello",
+      logical   = TRUE,
+      intvec    = 1:10,
+      list      = list(a = 1, b = "x"),
+      raw       = as.raw(0:255),
+      complex   = 1+2i,
+      dataframe = data.frame(x = 1:3)
+    )
+    for (nm in names(objs)) {
+      saveRDS(objs[[nm]], paste0(nm, ".rds"), compress = FALSE)
+      saveRDS(objs[[nm]], paste0(nm, "_v2.rds"), version = 2, compress = FALSE)
+      saveRDS(objs[[nm]], paste0(nm, "_ascii.rds"), ascii = TRUE, compress = FALSE)
+    }
   ' 2>/dev/null ) || true
 
 ########################################################################

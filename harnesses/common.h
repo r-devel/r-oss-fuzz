@@ -2,7 +2,6 @@
  * Shared helpers for R fuzzing harnesses (libFuzzer).
  *
  * Provides:
- *   fuzz_reset_signals()   - Restore default signal handlers after R init
  *   fuzz_suppress_warnings() - Suppress R warnings to avoid buffer overflow
  *   fuzz_init_r()          - Full R initialization sequence
  *
@@ -13,7 +12,6 @@
 #define FUZZ_COMMON_H
 
 #include <limits.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,25 +19,8 @@
 #define R_NO_REMAP 1
 #include <Rembedded.h>
 #include <Rinternals.h>
+#include <Rinterface.h>   /* R_SignalHandlers */
 #include <R_ext/Parse.h>
-
-/*
- * Restore default signal handlers after R initialization.
- *
- * R installs custom handlers for SIGILL, SIGFPE, SIGSEGV, etc. that
- * enter an interactive recovery prompt instead of crashing.  This is
- * fine for interactive use but fatal for fuzzing: sanitizer traps
- * (UBSAN's ud2 -> SIGILL) and ASAN faults (SIGSEGV) must produce a
- * clean crash for the fuzzing engine to detect.
- */
-static void fuzz_reset_signals(void)
-{
-    signal(SIGILL,  SIG_DFL);
-    signal(SIGFPE,  SIG_DFL);
-    signal(SIGSEGV, SIG_DFL);
-    signal(SIGBUS,  SIG_DFL);
-    signal(SIGABRT, SIG_DFL);
-}
 
 /*
  * Suppress R warnings globally.
@@ -95,19 +76,24 @@ static void fuzz_set_r_home(void)
  *
  * Performs:
  *   1. Set R_HOME from binary location
- *   2. Initialize embedded R
- *   3. Reset signal handlers
- *   4. Suppress warnings
+ *   2. Initialize embedded R, without R's signal handlers
+ *   3. Suppress warnings
  */
 static void fuzz_init_r(void)
 {
     fuzz_set_r_home();
 
+    /* R's SIGSEGV/SIGILL/etc. handlers enter an interactive recovery
+     * prompt instead of crashing, which would hang the fuzzer.  Telling
+     * R not to install them (rather than resetting to SIG_DFL after
+     * init) keeps the sanitizers' own handlers in place, so wild-pointer
+     * faults still get full ASAN reports and clean deduplication. */
+    R_SignalHandlers = 0;
+
     char *r_argv[] = {"R", "--vanilla", "--no-echo", "--no-restore"};
     int r_argc = sizeof(r_argv) / sizeof(r_argv[0]);
     Rf_initEmbeddedR(r_argc, r_argv);
 
-    fuzz_reset_signals();
     fuzz_suppress_warnings();
 }
 

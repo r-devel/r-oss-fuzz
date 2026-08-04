@@ -34,9 +34,10 @@ ossfuzz.sh        the build script OSS-Fuzz runs
 | `agrep`        | `agrep` / `agrepl` — TRE approximate (edit-distance) matching |
 
 All targets embed R via `Rf_initEmbeddedR` and share the setup in
-`harnesses/common.h` (reset R's signal handlers so sanitizer traps crash
-cleanly, suppress warnings, and wrap each call in `R_ToplevelExec` to catch
-R's longjmp-on-error).
+`harnesses/common.h` (suppress R's signal handlers via `R_SignalHandlers = 0`
+so the sanitizers' own handlers stay in place and traps crash cleanly,
+suppress warnings, and wrap each call in `R_ToplevelExec` to catch R's
+longjmp-on-error).
 
 ## Adding or updating a target
 

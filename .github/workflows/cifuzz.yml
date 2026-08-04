@@ -7,10 +7,14 @@ on:
       - 'options/**'
       - 'seeds/**'
       - 'ossfuzz.sh'
+      - '.github/workflows/cifuzz.yml'
 permissions: read-all
 jobs:
   Fuzzing:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Build Fuzzers
         id: build
@@ -25,3 +29,15 @@ jobs:
           fuzz-seconds: 300
           language: c
           output-sarif: true
+      - name: Upload crash artifacts
+        uses: actions/upload-artifact@v4
+        if: failure() && steps.build.outcome == 'success'
+        with:
+          name: artifacts
+          path: ./out/artifacts
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && steps.build.outcome == 'success'
+        with:
+          sarif_file: cifuzz-sarif/results.sarif
+          checkout_path: cifuzz-sarif
