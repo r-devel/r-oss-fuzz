@@ -1,2 +1,5 @@
-[libfuzzer]
+# TRE/PCRE2 leak memory on some pattern-compile error paths. Disable leak
+# detection via ASAN_OPTIONS (the [libfuzzer] flag does not stop the
+# exit-time LeakSanitizer check); memory-error detection stays on.
+[asan]
 detect_leaks = 0

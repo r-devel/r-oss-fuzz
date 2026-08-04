@@ -1,0 +1,6 @@
+# scan() leaks R's line buffer (R_AllocStringBuffer) when it longjmps out
+# of scanVector on malformed numeric input, which fuzzing hits constantly.
+# Disable leak detection via ASAN_OPTIONS (the [libfuzzer] flag does not
+# stop the exit-time LeakSanitizer check); memory-error detection stays on.
+[asan]
+detect_leaks = 0

@@ -1,2 +1,5 @@
-[libfuzzer]
+# agrep uses TRE's approximate matcher, which can leak on error paths like
+# grep's. Disable leak detection via ASAN_OPTIONS (the [libfuzzer] flag does
+# not stop the exit-time LeakSanitizer check); memory-error detection stays on.
+[asan]
 detect_leaks = 0

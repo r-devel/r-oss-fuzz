@@ -68,10 +68,9 @@
 "[abc]+"
 
 # Edge cases
-""
 " "
-"\t"
-"\n"
+"\x09"
+"\x0a"
 "\x00"
 
 # Unicode
