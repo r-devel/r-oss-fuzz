@@ -89,7 +89,8 @@ is merged into `google/oss-fuzz`.
 
 ## License
 
-**TBD — to be chosen by R-devel.** R itself is distributed under GPL-2 |
-GPL-3; the harnesses here were adapted from the earlier `r-afl` work.
-Please add a `LICENSE` file (aligning with R, or a permissive license as
-preferred) before treating this repository as generally reusable.
+Distributed under the same terms as R itself: **GPL-2 | GPL-3** (you may
+use it under either the GNU General Public License version 2 or version 3).
+The full text of GPL-2 is in [`LICENSE`](./LICENSE); GPL-3 is available at
+<https://www.gnu.org/licenses/gpl-3.0.html>. The harnesses were adapted
+from the earlier `r-afl` work.
