@@ -1,0 +1,127 @@
+# R serialization format dictionary for AFL++
+
+# Format headers (XDR = "X\n", ASCII = "A\n", binary = "B\n")
+"X\x0a"
+"A\x0a"
+"B\x0a"
+
+# Encoding strings
+"UTF-8"
+"latin1"
+"CP1252"
+
+# SEXP type tags (as 32-bit big-endian for XDR format)
+# NILSXP (0)
+"\x00\x00\x00\x00"
+# SYMSXP (1)
+"\x00\x00\x00\x01"
+# LISTSXP (2)
+"\x00\x00\x00\x02"
+# CLOSXP (3)
+"\x00\x00\x00\x03"
+# ENVSXP (4)
+"\x00\x00\x00\x04"
+# PROMSXP (5)
+"\x00\x00\x00\x05"
+# LANGSXP (6)
+"\x00\x00\x00\x06"
+# SPECIALSXP (7)
+"\x00\x00\x00\x07"
+# BUILTINSXP (8)
+"\x00\x00\x00\x08"
+# CHARSXP (9)
+"\x00\x00\x00\x09"
+# LGLSXP (10)
+"\x00\x00\x00\x0a"
+# INTSXP (13)
+"\x00\x00\x00\x0d"
+# REALSXP (14)
+"\x00\x00\x00\x0e"
+# CPLXSXP (15)
+"\x00\x00\x00\x0f"
+# STRSXP (16)
+"\x00\x00\x00\x10"
+# VECSXP (19)
+"\x00\x00\x00\x13"
+# EXPRSXP (20)
+"\x00\x00\x00\x14"
+# RAWSXP (24)
+"\x00\x00\x00\x18"
+# S4SXP (25)
+"\x00\x00\x00\x19"
+
+# Special serialization type tags
+# ALTREP_SXP (238)
+"\x00\x00\x00\xee"
+# ATTRLISTSXP (239)
+"\x00\x00\x00\xef"
+# ATTRLANGSXP (240)
+"\x00\x00\x00\xf0"
+# BASEENV_SXP (241)
+"\x00\x00\x00\xf1"
+# EMPTYENV_SXP (242)
+"\x00\x00\x00\xf2"
+# BCREPREF (243)
+"\x00\x00\x00\xf3"
+# BCREPDEF (244)
+"\x00\x00\x00\xf4"
+# GENERICREFSXP (245)
+"\x00\x00\x00\xf5"
+# CLASSREFSXP (246)
+"\x00\x00\x00\xf6"
+# PERSISTSXP (247)
+"\x00\x00\x00\xf7"
+# PACKAGESXP (248)
+"\x00\x00\x00\xf8"
+# NAMESPACESXP (249)
+"\x00\x00\x00\xf9"
+# BASENAMESPACE_SXP (250)
+"\x00\x00\x00\xfa"
+# MISSINGARG_SXP (251)
+"\x00\x00\x00\xfb"
+# UNBOUNDVALUE_SXP (252)
+"\x00\x00\x00\xfc"
+# GLOBALENV_SXP (253)
+"\x00\x00\x00\xfd"
+# NILVALUE_SXP (254)
+"\x00\x00\x00\xfe"
+# REFSXP (255)
+"\x00\x00\x00\xff"
+
+# Common lengths (big-endian 32-bit)
+"\x00\x00\x00\x01"
+"\x00\x00\x00\x02"
+"\x00\x00\x00\x05"
+"\x00\x00\x00\x0a"
+"\xff\xff\xff\xff"
+
+# HASATTR flag (bit 9 set in type word)
+"\x00\x00\x02\x00"
+
+# NA values (XDR)
+# NA_INTEGER
+"\x80\x00\x00\x00"
+# NA_REAL (IEEE 754 quiet NaN used by R)
+"\x7f\xf0\x00\x00\x00\x00\x07\xa2"
+
+# Version fields (format version 3, R 4.5.0)
+"\x00\x00\x00\x03"
+"\x00\x04\x05\x03"
+
+# Common attribute names (as R strings)
+"names"
+"class"
+"dim"
+"dimnames"
+"levels"
+"row.names"
+"tsp"
+
+# Common class names
+"data.frame"
+"factor"
+"matrix"
+"array"
+"POSIXct"
+"POSIXlt"
+"Date"

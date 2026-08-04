@@ -1,0 +1,106 @@
+#
+# AFL++ dictionary for type coercion fuzzing.
+#
+# Numeric literals, special values, type suffixes, and edge-case
+# strings that exercise R's string-to-number/integer/complex/logical
+# parsing code paths.
+#
+
+# Special values
+"NA"
+"NA_real_"
+"NA_integer_"
+"NA_complex_"
+"NaN"
+"Inf"
+"-Inf"
+"+Inf"
+"NA_character_"
+"NULL"
+
+# Logical strings
+"TRUE"
+"FALSE"
+"T"
+"F"
+"true"
+"false"
+
+# Integer literals
+"0"
+"1"
+"-1"
+"42"
+"2147483647"
+"-2147483648"
+"2147483648"
+"0L"
+"42L"
+"-1L"
+
+# Float literals
+"0.0"
+".5"
+"3."
+"1e0"
+"1e308"
+"1e309"
+"1e-324"
+"1e-325"
+"5e-1"
+"2.2250738585072014e-308"
+"1.7976931348623157e+308"
+"4.9406564584124654e-324"
+
+# Scientific notation variations
+"1E10"
+"1e+10"
+"1e-10"
+"+1e10"
+"-1e10"
+"1.5e2"
+
+# Hex floats
+"0x1p0"
+"0x1.fp10"
+"0xABCDEF"
+"0x1f"
+"0xFF"
+
+# Complex numbers
+"1i"
+"1+2i"
+"1-2i"
+"-3+4i"
+"0+1i"
+"1e2+3e4i"
+"Inf+NaNi"
+
+# Whitespace and padding
+" "
+"\x09"
+"\x0a"
+"  42  "
+"\x093.14\x09"
+
+# Signs and decorators
+"+"
+"-"
+"+."
+"-."
+
+# Decimal point edge cases
+"."
+".."
+".e1"
+"e1"
+"1.2.3"
+
+# Thousands separators (not valid in R but interesting to fuzz)
+"1,000"
+"1,000,000"
+
+# Boundary values
+"9999999999999999999999999"
+"-9999999999999999999999999"
+"0.000000000000000000000001"

@@ -1,0 +1,27 @@
+name: CIFuzz
+on:
+  pull_request:
+    paths:
+      - 'harnesses/**'
+      - 'dictionaries/**'
+      - 'options/**'
+      - 'seeds/**'
+      - 'ossfuzz.sh'
+permissions: read-all
+jobs:
+  Fuzzing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Fuzzers
+        id: build
+        uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
+        with:
+          oss-fuzz-project-name: 'r'
+          language: c
+      - name: Run Fuzzers
+        uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
+        with:
+          oss-fuzz-project-name: 'r'
+          fuzz-seconds: 300
+          language: c
+          output-sarif: true

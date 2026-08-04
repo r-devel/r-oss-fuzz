@@ -1,0 +1,9 @@
+# Local OSS-Fuzz build artifacts
+/build/
+/out/
+/work/
+*.o
+
+# Editor / OS cruft
+*.swp
+.DS_Store
