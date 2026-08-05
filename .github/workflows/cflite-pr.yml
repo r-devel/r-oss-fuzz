@@ -50,6 +50,22 @@ jobs:
       - name: Run fuzzers
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        # Several targets time out or exhaust memory by design rather than by
+        # regression: TRE backtracks catastrophically on some patterns (the
+        # agrep corpus ships one deliberately), and both the decompress and
+        # unserialize targets will happily be asked for gigabytes by a crafted
+        # input.  Reporting those would fail nearly every run and train
+        # reviewers to ignore this check.  Memory-safety bugs, which are the
+        # point, are still reported.
+        #
+        # These are set as environment variables rather than action inputs on
+        # purpose: the action pinned at v1 does not declare `report-timeouts`
+        # or `report-ooms`, so passing them via `with:` is silently ignored
+        # (it only emits an "Unexpected input(s)" warning).  The image behind
+        # the action does read these variables.
+        env:
+          REPORT_TIMEOUTS: false
+          REPORT_OOMS: false
         with:
           language: c
           sanitizer: address
@@ -57,14 +73,6 @@ jobs:
           fuzz-seconds: 600
           mode: 'code-change'
           output-sarif: true
-          # Several targets time out or exhaust memory by design rather than by
-          # regression: TRE backtracks catastrophically on some patterns (the
-          # agrep corpus ships one deliberately), and the decompress target
-          # accepts compression bombs.  Reporting those would fail nearly every
-          # run and train reviewers to ignore this check.  Memory-safety bugs,
-          # which are the point, are still reported.
-          report-timeouts: false
-          report-ooms: false
 
       - name: Upload SARIF
         uses: github/codeql-action/upload-sarif@v3

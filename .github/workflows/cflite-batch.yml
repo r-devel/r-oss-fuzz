@@ -42,6 +42,13 @@ jobs:
 
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        # See cflite-pr.yml: timeouts and OOMs are expected behaviour for the
+        # regex, decompression and deserialization targets rather than
+        # regressions, and these must be environment variables because the
+        # action pinned at v1 does not declare them as inputs.
+        env:
+          REPORT_TIMEOUTS: false
+          REPORT_OOMS: false
         with:
           language: c
           sanitizer: address
@@ -49,7 +56,3 @@ jobs:
           fuzz-seconds: 3600
           mode: 'batch'
           parallel-fuzzing: true
-          # See cflite-pr.yml -- timeouts and OOMs are expected behaviour for
-          # the regex and decompression targets, not regressions.
-          report-timeouts: false
-          report-ooms: false
