@@ -41,5 +41,6 @@ RUN svn checkout --depth=infinity https://svn.r-project.org/R/trunk $SRC/r-sourc
 # here is configured identically to the R that the OSS-Fuzz build produces --
 # the two setups cannot drift apart in how R itself is built.
 COPY ossfuzz.sh /opt/ossfuzz.sh
+COPY patches /opt/patches
 COPY docker/base/build-r.sh /opt/build-r.sh
 RUN /opt/build-r.sh && rm -rf $SRC/r-source/.svn

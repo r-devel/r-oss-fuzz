@@ -1,0 +1,53 @@
+Fix out-of-bounds read in tre_parse_bracket_items on an unterminated
+POSIX character class.
+
+A pattern whose character class is cut short at the closing colon, such
+as the 9-byte pattern "[[:alpha:", makes the parser read past the end of
+the pattern buffer:
+
+    ==1==ERROR: AddressSanitizer: heap-buffer-overflow
+    READ of size 4
+        #0 tre_parse_bracket_items src/extra/tre/tre-parse.c:282
+        #1 tre_parse_bracket      src/extra/tre/tre-parse.c:453
+        #2 tre_parse              src/extra/tre/tre-parse.c:1388
+
+After scanning forward to the colon that ends the class name, the code
+assumes a ']' follows it and skips both with "re = endptr + 2".  When
+that colon is the final character of the pattern, re then points one
+element past ctx->re_end.  The loop guard tests "re == ctx->re_end",
+which an overshoot slips past, and the next iteration dereferences re.
+
+Require the closing colon to actually be followed by ']' before
+consuming both -- an unterminated class is then rejected with REG_ECTYPE
+as it already is when no colon is found at all -- and relax the loop
+guard to catch an overshoot rather than only exact equality.
+
+Reachable from R via grep(), sub(), agrep() and friends whenever the
+pattern comes from an untrusted source.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-08-05.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/extra/tre/tre-parse.c
++++ b/src/extra/tre/tre-parse.c
+@@ -275,7 +275,7 @@
+   while (status == REG_OK)
+     {
+       skip = 0;
+-      if (re == ctx->re_end)
++      if (re >= ctx->re_end)
+ 	{
+ 	  status = REG_EBRACK;
+ 	}
+@@ -317,7 +317,7 @@
+ 	      DPRINT(("tre_parse_bracket:  class: '%.*" STRF "'\n", REST(re)));
+ 	      while (endptr < ctx->re_end && *endptr != CHAR_COLON)
+ 		endptr++;
+-	      if (endptr != ctx->re_end)
++	      if (endptr + 1 < ctx->re_end && *(endptr + 1) == CHAR_RBRACKET)
+ 		{
+ 		  len = MIN(endptr - re - 2, 63);
+ #ifdef TRE_WCHAR

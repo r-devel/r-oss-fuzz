@@ -39,6 +39,12 @@ jobs:
           language: c
           sanitizer: address
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Publish this build so pull requests can tell a crash they
+          # introduced from one that was already there: cflite-pr.yml
+          # reproduces each crash against the most recent uploaded build and
+          # stays quiet if it reproduces there too.  Without a build to
+          # compare against, every pre-existing bug fails every pull request.
+          upload-build: true
 
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1

@@ -19,6 +19,7 @@ on:
     paths:
       - 'ossfuzz.sh'
       - 'docker/base/**'
+      - 'patches/**'
       - '.github/workflows/base-image.yml'
 
 permissions: read-all

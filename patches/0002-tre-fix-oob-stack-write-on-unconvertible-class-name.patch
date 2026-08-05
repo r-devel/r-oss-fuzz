@@ -1,0 +1,52 @@
+Fix out-of-bounds stack write in tre_parse_bracket_items when a character
+class name does not convert to a multibyte string.
+
+A bracket expression whose class name contains characters that cannot be
+converted, such as "[[:il\377\377\377\016+:]]+", writes outside a stack
+buffer:
+
+    ==1==ERROR: AddressSanitizer: stack-buffer-underflow
+    WRITE of size 1
+        #0 tre_parse_bracket_items src/extra/tre/tre-parse.c:342
+        #1 tre_parse_bracket       src/extra/tre/tre-parse.c:453
+        #2 tre_parse               src/extra/tre/tre-parse.c:1388
+
+The class name is converted into the 64-byte stack buffer tmp_str with
+wcsrtombs() (or wcstombs()), whose result is assigned to the size_t len
+and then used unchecked as "tmp_str[len] = '\0'".  Both functions return
+(size_t)-1 when a character does not convert, so len becomes SIZE_MAX and
+the store lands far below tmp_str.  A conversion that exactly fills the
+buffer is also mishandled: len then equals sizeof(tmp_str) and the store
+is one past the end.
+
+Treat a failed conversion as an empty class name -- tre_ctype("") is 0, so
+the class is rejected with REG_ECTYPE, which is how other invalid class
+names are already handled -- and clamp a full conversion to the last
+writable index.
+
+Note this is an out-of-bounds *write*, so it is more serious than the
+out-of-bounds read fixed in 0001.  Reachable from R via grep(), sub(),
+agrep() and friends whenever the pattern comes from an untrusted source.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-08-05.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/extra/tre/tre-parse.c
++++ b/src/extra/tre/tre-parse.c
+@@ -339,6 +339,14 @@
+ #else /* !TRE_WCHAR */
+ 		  strncpy(tmp_str, (const char*)re + 2, len);
+ #endif /* !TRE_WCHAR */
++		  /* wcsrtombs()/wcstombs() return (size_t)-1 if the class name
++		     contains characters that do not convert, and may return a
++		     length equal to the buffer size if it converts exactly.
++		     Either way tmp_str[len] would land outside tmp_str. */
++		  if (len == (size_t)-1)
++		    len = 0;
++		  else if (len >= sizeof(tmp_str))
++		    len = sizeof(tmp_str) - 1;
+ 		  tmp_str[len] = '\0';
+ 		  DPRINT(("  class name: %s\n", tmp_str));
+ 		  class = tre_ctype(tmp_str);

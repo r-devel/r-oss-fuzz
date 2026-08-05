@@ -43,6 +43,47 @@ if [ -n "${R_PREBUILT:-}" ]; then
 else
     cd "$R_SOURCE"
 
+    ####################################################################
+    # Local patches
+    ####################################################################
+    # patches/ carries fixes that have not landed in R yet, applied in
+    # filename order (hence the numeric prefixes -- one patch may depend
+    # on an earlier one).
+    #
+    # These are not cosmetic.  Fuzzing an R with a known crash is worse
+    # than it sounds: libFuzzer replays the entire stored corpus at
+    # startup, so a single crashing input stops a target from fuzzing at
+    # all, and no amount of CI configuration changes that.  Patching the
+    # crash out restores forward progress until the real fix lands.
+    #
+    # A patch that no longer applies is reported but does NOT fail the
+    # build.  R trunk moves daily and one stale patch should not take
+    # down all eight targets.  Two failure modes are worth telling apart
+    # in the log:
+    #
+    #   "already applied"  the fix landed upstream -- delete the patch
+    #   "does not apply"   context drifted -- the bug is probably still
+    #                      live, so the patch needs rebasing
+    if [ -d "$REPO/patches" ]; then
+        n_applied=0; n_already=0; n_failed=0
+        for p in "$REPO"/patches/*.patch; do
+            [ -e "$p" ] || continue
+            name=$(basename "$p")
+            if patch -p1 --dry-run --force --silent < "$p" >/dev/null 2>&1; then
+                patch -p1 --force --silent < "$p" >/dev/null
+                echo "ossfuzz.sh: patch $name: applied"
+                n_applied=$((n_applied + 1))
+            elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
+                echo "ossfuzz.sh: patch $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+                n_already=$((n_already + 1))
+            else
+                echo "ossfuzz.sh: patch $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
+                n_failed=$((n_failed + 1))
+            fi
+        done
+        echo "ossfuzz.sh: patches: $n_applied applied, $n_already already applied, $n_failed failed"
+    fi
+
     # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
     # them.  The C/C++ compiler links the sanitizer runtime.
     ./configure \
