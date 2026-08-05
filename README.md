@@ -18,6 +18,8 @@ dictionaries/     <name>.dict   (libFuzzer dictionaries)
 options/          <name>.options (libFuzzer per-target options)
 seeds/<name>/     static seed corpus files for that target
 ossfuzz.sh        the build script OSS-Fuzz runs
+.clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
+docker/base/      base image holding a prebuilt, instrumented R
 ```
 
 ## Fuzz targets
@@ -101,12 +103,46 @@ printf -- '-I%s/include\n-DR_NO_REMAP=1\n' "$(R RHOME)" > compile_flags.txt
 
 ## Continuous integration
 
-[`.github/workflows/cifuzz.yml`](./.github/workflows/cifuzz.yml) runs
-OSS-Fuzz [CIFuzz](https://google.github.io/oss-fuzz/getting-started/continuous-integration/)
-on pull requests: it builds the targets and briefly fuzzes them so a broken
-harness is caught before it reaches production. CIFuzz builds the upstream
-`r` project definition, so it only becomes effective once the `r` project
-is merged into `google/oss-fuzz`.
+Fuzzing runs from this repository's own CI via
+[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/), independently
+of OSS-Fuzz:
+
+| Workflow | Trigger | Does |
+|----------|---------|------|
+| [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual | builds the base image (an instrumented R) and pushes it to GHCR |
+| [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | pull requests   | builds the harnesses and fuzzes what the change affects |
+| [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | daily         | fuzzes every target and grows the stored corpus |
+| [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | weekly        | minimises the stored corpus |
+
+Building R takes the better part of an hour, which is far too slow to repeat
+per pull request. So `base-image.yml` builds R once into a container image and
+the fuzzing workflows only compile the harnesses against it — seconds rather
+than an hour. The trade-off is that ClusterFuzzLite fuzzes the R snapshot
+baked into that image rather than live trunk; the weekly rebuild bounds the
+lag. OSS-Fuzz proper is unaffected and still builds trunk from source daily.
+
+The same [`ossfuzz.sh`](./ossfuzz.sh) drives both, so they cannot drift apart
+in how R is configured. Two opt-in variables, both unset under OSS-Fuzz, do
+the work: `R_BUILD_ONLY` (build and install R, then stop — used when baking
+the base image) and `R_PREBUILT` (skip the R build, use an existing install —
+used by [`.clusterfuzzlite/build.sh`](./.clusterfuzzlite/build.sh)).
+
+A prebuilt R is only valid for the sanitizer and engine it was instrumented
+for. Mismatched, the harnesses would still build and run while reporting no
+coverage at all from inside R — silent and useless — so the image records what
+it was built for and the ClusterFuzzLite build refuses a mismatch. Adding a
+second sanitizer therefore means publishing a second base image tag.
+
+Corpora persist through ClusterFuzzLite's GitHub Actions filestore (the
+Actions cache), which is subject to size limits and eviction. If the corpus
+becomes valuable enough to guarantee, move it to a dedicated storage
+repository via the actions' `storage-repo` input.
+
+[`cifuzz.yml`](./.github/workflows/cifuzz.yml) runs OSS-Fuzz
+[CIFuzz](https://google.github.io/oss-fuzz/getting-started/continuous-integration/),
+which does the same job for pull requests but builds the upstream `r` project
+definition — so it cannot work until that project is merged into
+`google/oss-fuzz`. It is manual-only until then.
 
 ## License
 

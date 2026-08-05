@@ -18,33 +18,54 @@
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R_SOURCE="${R_SOURCE:-$SRC/r-source}"
 
+# Where R gets installed.  Two optional knobs let the expensive R build be
+# hoisted out of the per-run build, which is what the ClusterFuzzLite setup
+# does (see docker/base/): a base image runs this script with $R_BUILD_ONLY
+# to bake an instrumented R into the image, and each CI run then re-runs it
+# with $R_PREBUILT pointing at that tree, so only the harnesses compile.
+#
+#   R_PREBUILT=<dir>   use an already-installed R at <dir>, skip the R build
+#   R_BUILD_ONLY=1     build and install R, then stop (no harnesses, no $OUT)
+#
+# Both are unset in the OSS-Fuzz build, which builds R from source as usual.
+R_PREFIX="${R_PREFIX:-$WORK/r-install}"
+
 ########################################################################
 # 1. Build and install R
 ########################################################################
-cd "$R_SOURCE"
+if [ -n "${R_PREBUILT:-}" ]; then
+    echo "ossfuzz.sh: using prebuilt R at $R_PREBUILT"
+    R_PREFIX="$R_PREBUILT"
+    if [ ! -x "$R_PREFIX/bin/Rscript" ]; then
+        echo "ossfuzz.sh: no R install found at $R_PREFIX" >&2
+        exit 1
+    fi
+else
+    cd "$R_SOURCE"
 
-# Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
-# them.  The C/C++ compiler links the sanitizer runtime.
-./configure \
-    CC="$CC" \
-    CXX="$CXX" \
-    CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
-    CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
-    CPPFLAGS="" \
-    FFLAGS="" \
-    FCFLAGS="" \
-    LDFLAGS="$CFLAGS -lgfortran" \
-    --prefix="$WORK/r-install" \
-    --enable-R-shlib \
-    --with-x=no \
-    --disable-java \
-    --enable-strict-barrier \
-    --without-recommended-packages
+    # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
+    # them.  The C/C++ compiler links the sanitizer runtime.
+    ./configure \
+        CC="$CC" \
+        CXX="$CXX" \
+        CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
+        CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
+        CPPFLAGS="" \
+        FFLAGS="" \
+        FCFLAGS="" \
+        LDFLAGS="$CFLAGS -lgfortran" \
+        --prefix="$R_PREFIX" \
+        --enable-R-shlib \
+        --with-x=no \
+        --disable-java \
+        --enable-strict-barrier \
+        --without-recommended-packages
 
-make -j"$(nproc)"
-make install
+    make -j"$(nproc)"
+    make install
+fi
 
-R_HOME="$WORK/r-install/lib/R"
+R_HOME="$R_PREFIX/lib/R"
 R_INCLUDE="$R_HOME/include"
 R_LIB_DIR="$R_HOME/lib"
 
@@ -59,10 +80,16 @@ for lib in libgfortran.so.5 libquadmath.so.0; do
     fi
 done
 
+# Base-image mode: R is built and staged, and there is nothing else to do.
+if [ -n "${R_BUILD_ONLY:-}" ]; then
+    echo "ossfuzz.sh: R_BUILD_ONLY set -- R installed at $R_PREFIX, stopping"
+    exit 0
+fi
+
 # Bundle R_HOME into $OUT so the runner can find it: Rf_initEmbeddedR needs
 # it for base package data, encodings, etc.
 rm -rf "$OUT/r-install"
-cp -a "$WORK/r-install" "$OUT/r-install"
+cp -a "$R_PREFIX" "$OUT/r-install"
 
 ########################################################################
 # 2. Stage seed corpora
@@ -87,7 +114,7 @@ export R_HOME
 export LD_LIBRARY_PATH="$R_LIB_DIR:${LD_LIBRARY_PATH:-}"
 mkdir -p "$SEED_STAGE/unserialize"
 ( cd "$SEED_STAGE/unserialize" && \
-  "$WORK/r-install/bin/Rscript" --vanilla -e '
+  "$R_PREFIX/bin/Rscript" --vanilla -e '
     objs <- list(
       null      = NULL,
       integer   = 1L,

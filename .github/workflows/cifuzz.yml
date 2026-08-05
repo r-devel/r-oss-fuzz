@@ -1,13 +1,26 @@
 name: CIFuzz
+
+# CIFuzz builds the `r` project as defined in google/oss-fuzz, so it cannot
+# work until that project is merged (google/oss-fuzz#15952).  Until then it
+# would fail on every pull request, so it is manual-only; pull requests are
+# fuzzed by cflite-pr.yml instead, which needs nothing from upstream.
+#
+# When the upstream project lands, restore the pull_request trigger below and
+# decide whether to keep both -- CIFuzz exercises the real OSS-Fuzz project
+# definition, which ClusterFuzzLite does not.
+#
+#  pull_request:
+#    paths:
+#      - 'harnesses/**'
+#      - 'dictionaries/**'
+#      - 'options/**'
+#      - 'seeds/**'
+#      - 'ossfuzz.sh'
+#      - '.github/workflows/cifuzz.yml'
+
 on:
-  pull_request:
-    paths:
-      - 'harnesses/**'
-      - 'dictionaries/**'
-      - 'options/**'
-      - 'seeds/**'
-      - 'ossfuzz.sh'
-      - '.github/workflows/cifuzz.yml'
+  workflow_dispatch:
+
 permissions: read-all
 jobs:
   Fuzzing:

@@ -1,0 +1,44 @@
+name: ClusterFuzzLite prune
+
+# Minimises the stored corpus: drops inputs that no longer contribute coverage
+# so the corpus stays small enough to load quickly and cheap to store.  Without
+# this the corpus grows without bound and every batch run pays for it.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays at 04:00 UTC, after a week of batch runs have added to it.
+    - cron: '0 4 * * 1'
+
+permissions: read-all
+
+jobs:
+  Prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build fuzzers
+        uses: google/clusterfuzzlite/actions/build_fuzzers@v1
+        with:
+          language: c
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune corpus
+        uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        with:
+          language: c
+          sanitizer: address
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 600
+          mode: 'prune'
