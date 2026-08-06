@@ -46,6 +46,24 @@ jobs:
           # compare against, every pre-existing bug fails every pull request.
           upload-build: true
 
+      # Targets run with -rss_limit_mb=0 (REPORT_OOMS disables libFuzzer's own
+      # cap), and have peaked over 10GB of RSS -- times four with
+      # parallel-fuzzing on a 16GB runner.  Sample host memory so a run that
+      # ends in "The runner has received a shutdown signal" can be read as
+      # memory exhaustion rather than ordinary infrastructure reclamation,
+      # which is otherwise indistinguishable in the log.
+      #
+      # Caveat: if the runner is killed outright the upload step never runs
+      # and the samples are lost.  What this does give is the headroom margin
+      # on every run that survives, which is the number worth watching.
+      - name: Start memory sampler
+        run: |
+          ( while true; do
+              echo "$(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/ {print "used="$3"M avail="$7"M"}')"
+              sleep 10
+            done ) > "$RUNNER_TEMP/memory.log" 2>&1 &
+          disown
+
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
         # See cflite-pr.yml: timeouts and OOMs are expected behaviour for the
@@ -62,3 +80,11 @@ jobs:
           fuzz-seconds: 3600
           mode: 'batch'
           parallel-fuzzing: true
+
+      - name: Upload memory samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-samples
+          path: ${{ runner.temp }}/memory.log
+          if-no-files-found: warn
