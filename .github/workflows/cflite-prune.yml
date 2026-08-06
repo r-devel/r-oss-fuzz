@@ -36,6 +36,14 @@ jobs:
 
       - name: Prune corpus
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        # Pruning replays the stored corpus, so it meets the same expected
+        # timeouts and OOMs that cflite-batch.yml and cflite-pr.yml suppress --
+        # including an agrep unit that costs multiple GB on its own.  Without
+        # these the default -rss_limit_mb=2560 applies and pruning reports a
+        # corpus it was only asked to minimise.
+        env:
+          REPORT_TIMEOUTS: false
+          REPORT_OOMS: false
         with:
           language: c
           sanitizer: address
