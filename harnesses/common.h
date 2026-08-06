@@ -72,16 +72,52 @@ static void fuzz_set_r_home(void)
 }
 
 /*
+ * Cap R's vector heap.
+ *
+ * Hostile input reaches R's allocator directly -- a serialized vector can
+ * declare any length it likes, and coercion or scanning can be talked into
+ * asking for one -- so a 64KB input can request gigabytes.
+ *
+ * R enforces R_MAX_VSIZE in allocVector and signals an ordinary R error
+ * ("vector memory limit of N reached"), which the R_ToplevelExec wrapper
+ * below already catches -- so the iteration is discarded and fuzzing carries
+ * on.  That is the reason to prefer this over a sanitizer-level RSS limit:
+ * ASAN's soft_rss_limit_mb either aborts the process or starts handing NULL
+ * back to allocators that never expected it, and both look like crashes.
+ * Replaying a synthetic length-field bomb takes peak RSS from 3103MB to
+ * 51MB with this set, with the process surviving every iteration.
+ *
+ * This bounds R's own vector heap ONLY, and is not the fix for the largest
+ * peaks seen in CI.  Replaying the stored agrep corpus shows 8.5GB of RSS
+ * driven entirely by TRE compiling a 36-byte nested-repetition pattern,
+ * unchanged whether this limit is set or not.  Nor does libFuzzer's
+ * -malloc_limit_mb help there: that blowup is ~2.5 million allocations
+ * whose largest single member is 277MB, so a single-allocation limit high
+ * enough to be safe never fires.  Bounding that needs a guard on the
+ * pattern itself.
+ *
+ * The limit is deliberately far above anything a legitimate ~64KB input
+ * needs, so it costs no coverage; override R_MAX_VSIZE to retune.
+ */
+static void fuzz_set_vsize_limit(void)
+{
+    if (getenv("R_MAX_VSIZE") == NULL)
+        setenv("R_MAX_VSIZE", "1Gb", 1);
+}
+
+/*
  * Initialize R for fuzzing.  Call once from LLVMFuzzerInitialize.
  *
  * Performs:
  *   1. Set R_HOME from binary location
- *   2. Initialize embedded R, without R's signal handlers
- *   3. Suppress warnings
+ *   2. Cap the vector heap (must precede R's startup, which reads it)
+ *   3. Initialize embedded R, without R's signal handlers
+ *   4. Suppress warnings
  */
 static void fuzz_init_r(void)
 {
     fuzz_set_r_home();
+    fuzz_set_vsize_limit();
 
     /* R's SIGSEGV/SIGILL/etc. handlers enter an interactive recovery
      * prompt instead of crashing, which would hang the fuzzer.  Telling
