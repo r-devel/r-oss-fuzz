@@ -3,7 +3,10 @@
  *
  * Provides:
  *   fuzz_suppress_warnings() - Suppress R warnings to avoid buffer overflow
- *   fuzz_init_r()          - Full R initialization sequence
+ *   fuzz_init_r()            - Full R initialization sequence
+ *   fuzz_set_string()        - Stage a string input under a toplevel context
+ *   fuzz_set_raw_arg()       - Stage a raw-vector input likewise
+ *   fuzz_repeat_product_excessive() - Guard against TRE repeat blowup
  *
  * Adapted from r-afl's fuzz.h for use with libFuzzer instead of AFL++.
  */
@@ -12,6 +15,7 @@
 #define FUZZ_COMMON_H
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -79,30 +83,41 @@ static void fuzz_set_r_home(void)
  * asking for one -- so a 64KB input can request gigabytes.
  *
  * R enforces R_MAX_VSIZE in allocVector and signals an ordinary R error
- * ("vector memory limit of N reached"), which the R_ToplevelExec wrapper
- * below already catches -- so the iteration is discarded and fuzzing carries
- * on.  That is the reason to prefer this over a sanitizer-level RSS limit:
- * ASAN's soft_rss_limit_mb either aborts the process or starts handing NULL
- * back to allocators that never expected it, and both look like crashes.
- * Replaying a synthetic length-field bomb takes peak RSS from 3103MB to
- * 51MB with this set, with the process surviving every iteration.
+ * ("vector memory limit of N reached").  When it fires inside R_ToplevelExec
+ * the iteration is discarded and fuzzing carries on; every per-iteration
+ * allocation must therefore go through fuzz_set_string / fuzz_set_raw_arg
+ * below, which run under such a context.  That catchability is the reason
+ * to prefer this over a sanitizer-level RSS limit: ASAN's soft_rss_limit_mb
+ * either aborts the process or starts handing NULL back to allocators that
+ * never expected it, and both look like crashes.
  *
- * This bounds R's own vector heap ONLY, and is not the fix for the largest
- * peaks seen in CI.  Replaying the stored agrep corpus shows 8.5GB of RSS
- * driven entirely by TRE compiling a 36-byte nested-repetition pattern,
- * unchanged whether this limit is set or not.  Nor does libFuzzer's
- * -malloc_limit_mb help there: that blowup is ~2.5 million allocations
- * whose largest single member is 277MB, so a single-allocation limit high
- * enough to be safe never fires.  Bounding that needs a guard on the
- * pattern itself.
+ * Caveats:
+ *   - The cap bounds R's cumulative LIVE vector heap, not one input's
+ *     allocations.  Interned symbols are never collected, so the parse and
+ *     unserialize targets ratchet toward the cap over a long run.
+ *   - It bounds R's vector heap ONLY.  malloc-based allocations, like TRE
+ *     compiling a pattern, bypass it entirely; see
+ *     fuzz_repeat_product_excessive for that guard.
+ *   - It does cost coverage of code paths that need larger results.
+ *     Targets with legitimately large outputs (decompress: a 64KB bzip2
+ *     stream of zeros expands past 1GB) raise the default by defining
+ *     FUZZ_R_MAX_VSIZE before including this header.
+ *   - R's suffix parsing is case-sensitive: "4Gb" works, "4gb" silently
+ *     leaves the heap uncapped (R only warns on stderr at startup).  The
+ *     env override is for local runs; the CI runner does not forward
+ *     arbitrary environment variables.
  *
- * The limit is deliberately far above anything a legitimate ~64KB input
- * needs, so it costs no coverage; override R_MAX_VSIZE to retune.
+ * Local reproduction of vector-limit findings under plain Rscript needs
+ * the same value exported; see README.md.
  */
+#ifndef FUZZ_R_MAX_VSIZE
+# define FUZZ_R_MAX_VSIZE "1Gb"
+#endif
+
 static void fuzz_set_vsize_limit(void)
 {
     if (getenv("R_MAX_VSIZE") == NULL)
-        setenv("R_MAX_VSIZE", "1Gb", 1);
+        setenv("R_MAX_VSIZE", FUZZ_R_MAX_VSIZE, 1);
 }
 
 /*
@@ -149,6 +164,116 @@ static void fuzz_do_eval(void *data)
 {
     fuzz_eval_data_t *ed = (fuzz_eval_data_t *)data;
     Rf_eval(ed->call, ed->env);
+}
+
+/*
+ * Stage per-iteration inputs under a toplevel context.
+ *
+ * Rf_mkChar and Rf_allocVector can themselves signal the vector-limit
+ * error.  Outside a toplevel context that error longjmps into a stack
+ * frame that returned during Rf_initEmbeddedR -- undefined behaviour --
+ * so input staging must be wrapped just like evaluation.  Both helpers
+ * return FALSE when the allocation failed; skip the iteration then.
+ */
+typedef struct {
+    SEXP vec;
+    const char *str;
+} fuzz_string_data_t;
+
+static void fuzz_do_set_string(void *data)
+{
+    fuzz_string_data_t *sd = (fuzz_string_data_t *)data;
+    SET_STRING_ELT(sd->vec, 0, Rf_mkChar(sd->str));
+}
+
+static Rboolean fuzz_set_string(SEXP vec, const char *str)
+{
+    fuzz_string_data_t sd = { vec, str };
+    return R_ToplevelExec(fuzz_do_set_string, &sd);
+}
+
+typedef struct {
+    SEXP call;
+    const uint8_t *data;
+    size_t size;
+} fuzz_raw_data_t;
+
+static void fuzz_do_set_raw(void *data)
+{
+    fuzz_raw_data_t *rd = (fuzz_raw_data_t *)data;
+
+    /* The raw vector is reachable from the (protected) call as soon as
+     * SETCADR runs, and nothing allocates before the memcpy completes,
+     * so no extra protection is needed. */
+    SEXP raw = Rf_allocVector(RAWSXP, (R_xlen_t)rd->size);
+    SETCADR(rd->call, raw);
+    memcpy(RAW(raw), rd->data, rd->size);
+}
+
+static Rboolean fuzz_set_raw_arg(SEXP call, const uint8_t *data, size_t size)
+{
+    fuzz_raw_data_t rd = { call, data, size };
+    return R_ToplevelExec(fuzz_do_set_raw, &rd);
+}
+
+/*
+ * Guard against TRE's bounded-repeat blowup.
+ *
+ * TRE compiles bounded repeats by duplicating the pattern AST, so nested
+ * counted repeats multiply: a 36-byte pattern like
+ * (?:a{2,101,})(?:a{2,101,}){100}{100} expands to ~10^8 nodes and >8GB of
+ * allocations at compile time.  Those allocations are malloc, not R's
+ * vector heap, so R_MAX_VSIZE cannot bound them; reject the pattern
+ * before it reaches R instead.
+ *
+ * The product of all repeat bounds is a deliberate over-estimate --
+ * sequential (non-nested) repeats add rather than multiply -- trading a
+ * little coverage of repeat-heavy patterns for a hard bound on compile
+ * cost.
+ */
+#define FUZZ_MAX_REPEAT_PRODUCT 1000000.0
+
+static int fuzz_repeat_product_excessive(const char *pattern)
+{
+    double product = 1.0;
+
+    for (const char *p = pattern; *p != '\0'; p++) {
+        if (*p != '{')
+            continue;
+
+        /* The largest number inside the braces bounds this repeat. */
+        unsigned long bound = 0, cur = 0;
+        int counted = 0;
+        const char *q = p + 1;
+        for (; *q != '\0' && *q != '}'; q++) {
+            if (*q >= '0' && *q <= '9') {
+                cur = cur * 10 + (unsigned long)(*q - '0');
+                if (cur > 10000000)
+                    cur = 10000000;  /* saturate; already over any budget */
+                counted = 1;
+            } else if (*q == ',') {
+                if (cur > bound)
+                    bound = cur;
+                cur = 0;
+            } else {
+                counted = 0;  /* not a counted repeat, e.g. "{a}" */
+                break;
+            }
+        }
+        if (!counted || *q != '}')
+            continue;
+
+        if (cur > bound)
+            bound = cur;
+        if (bound > 1)
+            product *= (double)bound;
+        if (product > FUZZ_MAX_REPEAT_PRODUCT)
+            return 1;
+
+        p = q;
+    }
+
+    return 0;
 }
 
 #endif /* FUZZ_COMMON_H */
