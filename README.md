@@ -41,6 +41,13 @@ so the sanitizers' own handlers stay in place and traps crash cleanly,
 suppress warnings, and wrap each call in `R_ToplevelExec` to catch R's
 longjmp-on-error).
 
+The harnesses also cap R's vector heap by defaulting `R_MAX_VSIZE=1Gb`
+(`4Gb` for `decompress`), so a crafted length field cannot allocate the
+whole machine. To reproduce a harness finding under plain `R`/`Rscript`,
+export the same value first — R is otherwise uncapped on Linux, and any
+behaviour that depends on the "vector memory limit reached" error path
+will not reproduce without it.
+
 ## Adding or updating a target
 
 The build is convention-driven — there is no per-target wiring in
