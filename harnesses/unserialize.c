@@ -54,15 +54,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size == 0 || size > FUZZ_MAX_INPUT)
         return 0;
 
-    SEXP raw_vec;
-    Rf_protect(raw_vec = Rf_allocVector(RAWSXP, size));
-    memcpy(RAW(raw_vec), data, size);
-
-    SETCADR(call_unser, raw_vec);
+    if (!fuzz_set_raw_arg(call_unser, data, size))
+        return 0;
 
     fuzz_eval_data_t ed = { .call = call_unser, .env = R_GlobalEnv };
     R_ToplevelExec(fuzz_do_eval, &ed);
 
-    Rf_unprotect(1);
     return 0;
 }

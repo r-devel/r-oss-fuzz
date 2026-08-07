@@ -77,10 +77,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(buf, data, size);
     buf[size] = '\0';
 
+    if (!fuzz_set_string(x_str, buf))
+        return 0;
+
     parse_data_t pd;
     pd.status = PARSE_NULL;
-
-    SET_STRING_ELT(x_str, 0, Rf_mkChar(buf));
     pd.str = x_str;
     R_ToplevelExec(do_parse, &pd);
 

@@ -98,7 +98,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(buf, data, size);
     buf[size] = '\0';
 
-    SET_STRING_ELT(x_str, 0, Rf_mkChar(buf));
+    if (!fuzz_set_string(x_str, buf))
+        return 0;
 
     fuzz_eval_data_t ed = { .env = R_GlobalEnv };
     for (int i = 0; i < N_CALLS; i++) {

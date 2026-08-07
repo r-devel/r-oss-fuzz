@@ -81,7 +81,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(buf, data, size);
     buf[size] = '\0';
 
-    SET_STRING_ELT(x_pat, 0, Rf_mkChar(buf));
+    /* TRE compiles bounded repeats by AST duplication; unbounded nesting
+     * has cost 8.5GB from a 36-byte pattern.  See common.h. */
+    if (fuzz_repeat_product_excessive(buf))
+        return 0;
+
+    if (!fuzz_set_string(x_pat, buf))
+        return 0;
 
     fuzz_eval_data_t ed = { .env = R_GlobalEnv };
     for (int i = 0; i < N_CALLS; i++) {

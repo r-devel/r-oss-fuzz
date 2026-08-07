@@ -46,12 +46,47 @@ jobs:
           # compare against, every pre-existing bug fails every pull request.
           upload-build: true
 
+      # Targets run with -rss_limit_mb=0 (REPORT_OOMS disables libFuzzer's
+      # own cap) and have peaked over 10GB of RSS on a 16GB runner.  Sample
+      # host memory so a run that ends in "The runner has received a shutdown
+      # signal" can be read as memory exhaustion rather than ordinary
+      # infrastructure reclamation, which is otherwise indistinguishable in
+      # the log.  Memory spikes are bursty, so sample every 2s -- a coarser
+      # interval can miss the peak entirely and overstate the headroom.
+      #
+      # Caveat: if the runner is killed outright the upload step never runs
+      # and the samples are lost.  What this does give is the headroom margin
+      # on every run that survives, which is the number worth watching.
+      - name: Start memory sampler
+        run: |
+          ( while true; do
+              echo "$(date -u '+%F %T') $(free -m | awk '/^Mem:/ {print "used="$3"M avail="$7"M"}')"
+              sleep 2
+            done ) > "$RUNNER_TEMP/memory.log" 2>&1 &
+          echo "SAMPLER_PID=$!" >> "$GITHUB_ENV"
+          disown
+
       - name: Run fuzzers
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
+        # Bound this step below the job timeout so the sampler upload still
+        # runs if fuzzing wedges; steps skipped by a job-level timeout take
+        # the memory log down with them.
+        timeout-minutes: 150
         # See cflite-pr.yml: timeouts and OOMs are expected behaviour for the
         # regex, decompression and deserialization targets rather than
         # regressions, and these must be environment variables because the
         # action pinned at v1 does not declare them as inputs.
+        #
+        # Note that "Not reporting crash in <target> because process timed
+        # out", which shows up for the last targets in a run, is NOT a hang.
+        # The libFuzzer engine inside the pinned runner image allows the
+        # fuzz process max_total_time plus a fixed ~10s clean-exit grace
+        # (clusterfuzz's LIBFUZZER_CLEAN_EXIT_TIME), then kills it and marks
+        # the run timed out.  Remaining time is redistributed across
+        # remaining targets, so their budgets grow towards ~1000s while the
+        # shutdown allowance stays fixed, and whichever target needs longer
+        # than that to write out its corpus and exit trips it.  Their
+        # slowest_unit_time_sec is 0.
         env:
           REPORT_TIMEOUTS: false
           REPORT_OOMS: false
@@ -61,4 +96,29 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: 3600
           mode: 'batch'
-          parallel-fuzzing: true
+          # Two workers, not one per core.  Parallel workers replay the same
+          # corpus at startup, so expensive units land on every worker at the
+          # same moment; a 16GB runner has previously died replaying an
+          # 8.5GB-RSS agrep pattern times four.  The harnesses now reject
+          # that pattern class outright (fuzz_repeat_product_excessive) and
+          # cap R's heap per process, so two workers fit with margin -- the
+          # memory-samples artifact is the evidence to consult before raising
+          # this again.
+          parallel-fuzzing: 2
+
+      # Give the log a deterministic end before uploading it; the sampler
+      # would otherwise keep appending while the artifact is being zipped.
+      - name: Stop memory sampler
+        if: always()
+        run: |
+          kill "$SAMPLER_PID" 2>/dev/null || true
+
+      - name: Upload memory samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-samples
+          path: ${{ runner.temp }}/memory.log
+          if-no-files-found: warn
+          # Immutable v4 artifacts otherwise fail the upload on re-run.
+          overwrite: true

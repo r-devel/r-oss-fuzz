@@ -13,6 +13,12 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Legitimate small inputs expand past 1GB here (a 64KB bzip2 stream of
+ * zeros decompresses to ~1.25GB, and memDecompress keeps its doubling
+ * retries live on the R_alloc stack), so the shared 1Gb default would
+ * cut off exactly the buffer-sizing paths this target exists to cover. */
+#define FUZZ_R_MAX_VSIZE "4Gb"
+
 #include "common.h"
 
 #define FUZZ_MAX_INPUT (1024 * 64)
@@ -72,18 +78,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
      * One type per input keeps libFuzzer's coverage feedback clean and
      * avoids cross-library state bleed. */
     int idx = data[0] & 0x03;
-    const uint8_t *payload = data + 1;
-    size_t payload_len = size - 1;
 
-    SEXP x_raw;
-    Rf_protect(x_raw = Rf_allocVector(RAWSXP, (R_xlen_t)payload_len));
-    memcpy(RAW(x_raw), payload, payload_len);
-
-    SETCADR(calls[idx], x_raw);
+    if (!fuzz_set_raw_arg(calls[idx], data + 1, size - 1))
+        return 0;
 
     fuzz_eval_data_t ed = { .call = calls[idx], .env = R_GlobalEnv };
     R_ToplevelExec(fuzz_do_eval, &ed);
 
-    Rf_unprotect(1); /* x_raw */
     return 0;
 }

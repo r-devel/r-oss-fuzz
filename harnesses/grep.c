@@ -76,9 +76,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(buf, data, size);
     buf[size] = '\0';
 
-    fuzz_eval_data_t ed = { .env = R_GlobalEnv };
+    /* Same TRE bounded-repeat blowup as agrep; grep's TRE calls compile
+     * the same pattern.  PCRE2 loses a little repeat coverage too, but it
+     * rejects nested quantifiers anyway.  See common.h. */
+    if (fuzz_repeat_product_excessive(buf))
+        return 0;
 
-    SET_STRING_ELT(x_pat, 0, Rf_mkChar(buf));
+    if (!fuzz_set_string(x_pat, buf))
+        return 0;
+
+    fuzz_eval_data_t ed = { .env = R_GlobalEnv };
 
     ed.call = call_grep_tre;
     R_ToplevelExec(fuzz_do_eval, &ed);

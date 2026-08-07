@@ -1,0 +1,8 @@
+# memDecompress's xz path initializes an lzma decoder before calling
+# R_alloc; if that allocation raises R's vector-limit error, the longjmp
+# skips lzma_end() and leaks the decoder state (an upstream R bug -- drop
+# this once fixed there).  Disable leak detection via ASAN_OPTIONS
+# (the [libfuzzer] flag does not stop the exit-time LeakSanitizer check);
+# memory-error detection stays on.
+[asan]
+detect_leaks = 0
