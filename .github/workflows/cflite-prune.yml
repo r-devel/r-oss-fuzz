@@ -36,14 +36,14 @@ jobs:
 
       - name: Prune corpus
         uses: google/clusterfuzzlite/actions/run_fuzzers@v1
-        # Pruning replays the stored corpus, so it meets the same expected
-        # timeouts and OOMs that cflite-batch.yml and cflite-pr.yml suppress --
-        # including an agrep unit that costs multiple GB on its own.  Without
-        # these the default -rss_limit_mb=2560 applies and pruning reports a
-        # corpus it was only asked to minimise.
-        env:
-          REPORT_TIMEOUTS: false
-          REPORT_OOMS: false
+        # Prune mode calls libFuzzer's corpus merge directly and never
+        # consults REPORT_TIMEOUTS/REPORT_OOMS (those only affect fuzz
+        # runs), so there is nothing to suppress here and the merge runs
+        # under libFuzzer's built-in rss limit.  Corpus units expensive
+        # enough to trip that limit are handled where they arise instead:
+        # the agrep/grep harnesses reject patterns whose bounded-repeat
+        # product would blow up TRE at compile time, so replaying them
+        # during the merge costs nothing.
         with:
           language: c
           sanitizer: address
