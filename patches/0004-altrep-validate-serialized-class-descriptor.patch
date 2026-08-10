@@ -1,0 +1,67 @@
+Fix null-pointer dereference in ALTREP_UNSERIALIZE_EX on a malformed
+serialized ALTREP class descriptor.
+
+A crafted serialized stream that presents an ALTREP object whose class
+descriptor is not a well-formed three-element pairlist crashes R while
+unserializing it:
+
+    ==1==ERROR: AddressSanitizer: SEGV on unknown address
+    READ of size 8
+        #0 CHK                    src/main/memory.c:160
+        #1 CADDR                  src/main/memory.c:4496
+        #2 ALTREP_UNSERIALIZE_EX  src/main/altrep.c:303
+        #3 ReadItem               src/main/serialize.c:1922
+        #4 R_Unserialize          src/main/serialize.c:2294
+
+ReadItem() reads the descriptor (info) from the stream as an arbitrary
+object and hands it straight to ALTREP_UNSERIALIZE_EX(), which reads
+CAR(info), CADR(info) and INTEGER0(CADDR(info))[0] with no validation.
+On the serialize side that descriptor is always list3(csym, psym,
+stype) -- a three-element pairlist whose third element is an integer
+scalar -- but a hand-crafted stream can supply a shorter list, a
+non-list, or a third element that is not an integer vector, so CADR /
+CADDR walk off the end of the list and dereference an invalid pointer.
+
+ALTREP_UNSERIALIZE_CLASS() already guards its own reads with
+"TYPEOF(info) == LISTSXP", but ALTREP_UNSERIALIZE_EX() reads the fields
+before calling it, and that guard alone would not catch a list shorter
+than three elements or a wrong-typed type field.
+
+Validate the descriptor up front and reject a malformed one with the
+same error the function already raises for an unusable descriptor
+("cannot unserialize this ALTREP object").  The checks are staged so
+each CDR/CDDR/CADDR is reached only after the preceding node is known to
+be a pairlist, so the validation itself never dereferences off the end.
+
+unserialize() of untrusted data is documented as unsafe, but a hard SEGV
+rather than a clean R error is still a robustness bug.  Reachable from R
+via unserialize() / readRDS() on an attacker-supplied stream.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-08-10.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/altrep.c
++++ b/src/main/altrep.c
+@@ -298,6 +298,19 @@
+ attribute_hidden SEXP
+ ALTREP_UNSERIALIZE_EX(SEXP info, SEXP state, SEXP attr, int objf, int levs)
+ {
++    /* info is the serialized class descriptor: a three-element pairlist of
++       the class symbol, the package symbol, and an integer scalar type
++       (see SET_ALTREP_CLASS_SERIALIZED_CLASS / list3 above).  A crafted
++       serialized stream can put any object here, so reject a malformed
++       descriptor with a clean error rather than dereferencing CADR/CADDR
++       off the end of a short or wrong-typed list. */
++    if (TYPEOF(info) != LISTSXP ||
++	TYPEOF(CDR(info)) != LISTSXP ||
++	TYPEOF(CDDR(info)) != LISTSXP ||
++	TYPEOF(CADDR(info)) != INTSXP ||
++	XLENGTH(CADDR(info)) < 1)
++	error("cannot unserialize this ALTREP object");
++
+     SEXP csym = ALTREP_SERIALIZED_CLASS_CLSSYM(info);
+     SEXP psym = ALTREP_SERIALIZED_CLASS_PKGSYM(info);
+     int type = ALTREP_SERIALIZED_CLASS_TYPE(info);
