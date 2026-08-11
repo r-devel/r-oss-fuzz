@@ -32,5 +32,11 @@ if [ "$built_sanitizer" != "$SANITIZER" ] || [ "$built_engine" != "$FUZZING_ENGI
     exit 1
 fi
 
+# ossfuzz.sh holds the TRE-exercising targets back from OSS-Fuzz proper
+# (see DEFERRED_TARGETS there), because its findings carry a public
+# disclosure clock.  ClusterFuzzLite findings stay within this repository's
+# CI, so fuzz everything here.
+export DEFERRED_TARGETS=""
+
 export R_PREBUILT
 exec "$SRC/r-oss-fuzz/ossfuzz.sh"
