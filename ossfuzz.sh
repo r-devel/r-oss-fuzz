@@ -58,7 +58,7 @@ else
     #
     # A patch that no longer applies is reported but does NOT fail the
     # build.  R trunk moves daily and one stale patch should not take
-    # down all eight targets.  Two failure modes are worth telling apart
+    # down every target.  Two failure modes are worth telling apart
     # in the log:
     #
     #   "already applied"  the fix landed upstream -- delete the patch
@@ -187,8 +187,27 @@ mkdir -p "$SEED_STAGE/unserialize"
 #   seeds/<name>/             ->  $OUT/<name>_seed_corpus.zip
 #
 # To add a target: drop a harnesses/<name>.c (plus any of the above).
+#
+# DEFERRED_TARGETS holds names back from the OSS-Fuzz build.  The initial
+# OSS-Fuzz scope is deliberately narrow: every finding lands in the public
+# tracker with a 90-day disclosure clock, and the regex targets mostly
+# surface bugs in the bundled TRE engine, whose dormant upstream means
+# each fix must be hand-patched into R.  That triage load should be opted
+# into deliberately, once the initial targets have settled -- promoting a
+# target is just deleting its name here.  ClusterFuzzLite is not so
+# constrained (findings stay within this repository's CI), so
+# .clusterfuzzlite/build.sh clears the list and keeps fuzzing everything.
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep}"
+
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
+
+    case " $DEFERRED_TARGETS " in
+        *" $name "*)
+            echo "ossfuzz.sh: target $name: deferred -- skipping"
+            continue
+            ;;
+    esac
 
     $CC $CFLAGS -fno-omit-frame-pointer \
         -I"$R_INCLUDE" \
