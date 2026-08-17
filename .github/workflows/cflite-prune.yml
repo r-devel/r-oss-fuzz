@@ -44,9 +44,21 @@ jobs:
         # the agrep/grep harnesses reject patterns whose bounded-repeat
         # product would blow up TRE at compile time, so replaying them
         # during the merge costs nothing.
+        #
+        # In prune mode fuzz-seconds is not fuzzing time: cifuzz divides it
+        # across the targets and hands each slice to libFuzzer as the merge
+        # deadline (run_seconds = max(remaining // left, fuzz_seconds // n),
+        # infra/cifuzz/run_fuzzers.py).  A slice that expires aborts the whole
+        # step with "Merging new testcases timed out", losing the pruned
+        # corpora of every target that had not yet run.  At 600 the slowest
+        # target, unserialize, got 120s for 2270 inputs it replays at ~16
+        # exec/s, and that is what happened.  Budget for the slow targets
+        # rather than the average: 2400 floors every target at 300s, and the
+        # whole step has historically finished in under 10 minutes against a
+        # 120-minute job timeout, so the ceiling costs nothing when unused.
         with:
           language: c
           sanitizer: address
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          fuzz-seconds: 600
+          fuzz-seconds: 2400
           mode: 'prune'
