@@ -1,0 +1,100 @@
+Fix type confusion on an expanded iteration node carrying approximate
+matching parameters, and the truncated union copy in tre_copy_ast that
+turns the same patterns into a wild pointer dereference on platforms
+where wctype_t is narrower than a pointer.
+
+A pattern using TRE's approximate-bound syntax with a repeat count above
+one, such as "abc]{2+14}{2+4}" ("repeat twice, allowing up to 14
+insertions"), reads out of bounds while compiling:
+
+    ==126==ERROR: AddressSanitizer: heap-buffer-overflow
+    READ of size 1 ... 0 bytes after 1024-byte region
+        #0 tre_copy_ast   src/extra/tre/tre-compile.c:775
+        #1 tre_expand_ast src/extra/tre/tre-compile.c:915
+        #2 tre_compile    src/extra/tre/tre-compile.c:1998
+        #3 do_agrep       src/main/agrep.c:203
+
+tre_expand_ast() rewrites each iteration node with a finite repeat count
+into a catenated sequence of copies of itself, replacing the node in
+place:
+
+    node->obj = seq1->obj;
+    node->type = seq1->type;      /* now CATENATION */
+
+If that node also carries approximate matching parameters, the code a
+few lines below wraps it in a pair of PARAMETER literals, and to do so
+it needs a stand-in node holding the content that `node' had before the
+wrapping.  It builds that stand-in with a hardcoded type:
+
+    node_copy = tre_ast_new_node(mem, ITERATION, sizeof(tre_iteration_t));
+    node_copy->obj = node->obj;
+
+The fresh tre_iteration_t is immediately discarded by the assignment, so
+node_copy ends up tagged ITERATION while holding whatever `node' now
+points at -- a 16-byte tre_catenation_t.  Every later traversal reads it
+back as a 32-byte tre_iteration_t: the load of the `minimal' bitfield at
+offset 16 is the one-byte read past the end of the arena block above,
+and `min' and `max' come back as halves of the catenation's `right'
+pointer.  Pass node->type instead, which is what the stand-in is for.
+
+The bug is not only a memory-safety one.  R replaced the upstream
+assert() in tre_ast_to_tnfa_iter() with a REG_BADBR return, so the
+garbage iter->max lands there and every approximate bound with a repeat
+count above one currently fails with "Invalid contents of {}" rather
+than compiling.  With this fix "a{2+14}", "a{2~1}{2~1}" and
+"abc]{2+14}{2+4}" compile and match; ordinary bounds such as "a{2,3}"
+and "(ab){2}c" are unaffected either way.
+
+The second hunk fixes a defect that the first one exposes.  Reaching the
+PARAMETER literals through tre_copy_ast() runs this line, added in R in
+2014 to fix PR#16009:
+
+    ((tre_literal_t*)(*result)->obj)->u.class = lit->u.class;
+
+tre_literal_t's `u' is a union of a tre_ctype_t and an int *params, and
+a PARAMETER literal keeps its parameter array in the latter.  Copying
+the union through its `class' member copies only sizeof(tre_ctype_t)
+bytes.  tre_ctype_t is wctype_t, which is 8 bytes on glibc -- so the
+pointer survives there by accident -- but 4 bytes on macOS, where the
+copy truncates it and the parameter array is dereferenced through the
+low half of a pointer:
+
+    #0 tre_match_empty  src/extra/tre/tre-compile.c:1259
+    #1 tre_compute_nfl  src/extra/tre/tre-compile.c:1491
+    #2 tre_compile      src/extra/tre/tre-compile.c:2021
+
+Copy the whole union instead, which is correct for both members.
+
+Neither defect is specific to agrep(): both are reachable from any
+caller of the default TRE engine, so grep(), sub(), gsub(), regexpr()
+and friends are affected whenever the pattern comes from an untrusted
+source.  On macOS the combination segfaults released R --
+grep("a{2+14}{2+4}", "aaa") is enough on R 4.6.1.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-08-20.
+The first defect is upstream TRE's; the second is R's own.  Delete this
+patch once the fix lands in R trunk (ossfuzz.sh will report it as
+already-applied in the meantime, which is harmless).
+
+--- a/src/extra/tre/tre-compile.c
++++ b/src/extra/tre/tre-compile.c
+@@ -718,7 +718,7 @@
+ 		if (*result == NULL)
+ 		  status = REG_ESPACE;
+ 
+-                ((tre_literal_t*)(*result)->obj)->u.class = lit->u.class;  
++                ((tre_literal_t*)(*result)->obj)->u = lit->u;
+ 		if (pos > *max_pos)
+ 		  *max_pos = pos;
+ 		break;
+@@ -1005,7 +1005,7 @@
+ 		old_params[TRE_PARAM_DEPTH] = params_depth;
+ 		/* XXX - this is the only place where ast_new_node is
+ 		   needed -- should be moved inside AST module. */
+-		node_copy = tre_ast_new_node(mem, ITERATION,
++		node_copy = tre_ast_new_node(mem, node->type,
+ 					     sizeof(tre_iteration_t));
+ 		if (!node_copy)
+ 		  return REG_ESPACE;
