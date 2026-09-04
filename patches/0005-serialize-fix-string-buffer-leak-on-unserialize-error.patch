@@ -1,0 +1,73 @@
+Fix a memory leak in unserialize() when reading a long string errors
+mid-item.
+
+ReadItem() reads a CHARSXP of length >= 1000 bytes into a buffer
+allocated with CallocCharBuf(), and ReadChar() can signal an R error
+before the buffer is freed: a truncated stream raises "read error",
+and an embedded nul raises "embedded nul in string".  The error
+unwinds past the R_Free() call and the buffer leaks:
+
+    ==132==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 9371649 byte(s) in 1 object(s) allocated from:
+        #1 R_chk_calloc        src/main/memory.c:3550
+        #2 ReadItem_Recursive  src/main/serialize.c:2030
+        #3 ReadItem            src/main/serialize.c:2137
+        #6 R_Unserialize       src/main/serialize.c:2294
+
+ConvertChar() has the same shape around mkCharLenCE(), which can also
+signal (again for an embedded nul).  In both places, allocate the
+buffer with R_alloc() bracketed by vmaxget()/vmaxset() instead, so it
+lives on the R heap and is reclaimed by the GC when an error unwinds.
+
+Found by fuzzing R with libFuzzer + LeakSanitizer (ClusterFuzzLite
+unserialize target; leaked inputs live in the stored corpus, so every
+batch run replays them at startup and stops with exit code 77).
+
+Upstream status: reported as R Bugzilla bug 19157 with this fix
+attached (also r-devel/r-svn PR #322).  Delete this patch once the fix
+lands in R trunk (ossfuzz.sh will report it as already-applied in the
+meantime, which is harmless).
+
+diff --git a/src/main/serialize.c b/src/main/serialize.c
+index e5e749a79c..c5f22d34a9 100644
+--- a/src/main/serialize.c
++++ b/src/main/serialize.c
+@@ -1658,9 +1658,12 @@ ConvertChar(void *obj, char *inp, size_t inplen, cetype_t enc)
+ 	    }
+ 	    return mkCharLenCE(buf, (int)(buflen - bufleft), enc);
+ 	} else {
+-	    char *buf = CallocCharBuf(buflen);
++	    /* R_alloc, not Calloc: mkCharLenCE can signal errors (e.g. for
++	       an embedded nul), which would leak a Calloc'd buffer */
++	    const void *vmax = vmaxget();
++	    char *buf = R_alloc(buflen + 1, sizeof(char));
+ 	    if (TryConvertString(obj, inp, inplen, buf, &bufleft) == -1) {
+-		R_Free(buf);
++		vmaxset(vmax);
+ 		if (errno == E2BIG) {
+ 		    buflen *= 2;
+ 		    continue;
+@@ -1668,7 +1671,7 @@ ConvertChar(void *obj, char *inp, size_t inplen, cetype_t enc)
+ 		    return R_NilValue;
+ 	    }
+ 	    SEXP ans = mkCharLenCE(buf, (int)(buflen - bufleft), enc);
+-	    R_Free(buf);
++	    vmaxset(vmax);
+ 	    return ans;
+ 	}
+     }
+@@ -2027,9 +2030,12 @@ static SEXP ReadItem_Recursive (int flags, SEXP ref_table, R_inpstream_t stream)
+ 		char cbuf[length+1];
+ 		PROTECT(s = ReadChar(stream, cbuf, length, levs));
+ 	    } else {
+-		char *cbuf = CallocCharBuf(length);
++		/* R_alloc, not Calloc: ReadChar can signal errors (truncated
++		   stream, embedded nul), which would leak a Calloc'd buffer */
++		const void *vmax = vmaxget();
++		char *cbuf = R_alloc((size_t)length + 1, sizeof(char));
+ 		PROTECT(s = ReadChar(stream, cbuf, length, levs));
+-		R_Free(cbuf);
++		vmaxset(vmax);
+ 	    }
+ 	    break;
+ 	case LGLSXP:
