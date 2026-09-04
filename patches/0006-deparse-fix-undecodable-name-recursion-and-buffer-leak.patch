@@ -1,0 +1,135 @@
+Fix error-handler recursion on undecodable names, plus the deparse
+buffer leak it exposes, so the parse target stops reporting leaks on
+parse errors whose call contains invalid multibyte strings.
+
+Two related bugs:
+
+1. isValidName() used Mbrtowc(), which signals an R error on an
+   undecodable multibyte string.  isValidName() is reached while
+   deparsing the offending call for an error message, so signalling
+   here makes error handling error again, recursing until "no more
+   error handlers available (recursive errors?)" forces an abort.  An
+   undecodable string is simply not a valid name: use plain mbrtowc()
+   and treat a decode failure as "not valid" / end of scan.  (Patched
+   in both gram.y and the checked-in, hand-synced gram.c.)
+
+2. deparse1WithCutoff() frees its heap-allocated line buffer only on
+   normal return, so any error signalled mid-deparse leaks it:
+
+    ==58==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 512 byte(s) in 1 object(s) allocated from:
+        #1 R_AllocStringBuffer  src/main/memory.c:4970
+        #2 print2buff           src/main/deparse.c:1569
+        #3 deparse1WithCutoff   src/main/deparse.c:267
+        #4 verrorcall_dflt      src/main/errors.c:811
+
+   Set up a CTXT_CCODE cleanup context that frees the buffer when an
+   error unwinds past the frame.
+
+Found by fuzzing R with libFuzzer + LeakSanitizer (ClusterFuzzLite
+parse target; leaked inputs live in the stored corpus, so every batch
+run replays them at startup and stops with exit code 77).
+
+Upstream status: submitted as r-devel/r-svn PR #323, not yet on the R
+Bugzilla as of 2026-09-04.  Delete this patch once the fix lands in R
+trunk (ossfuzz.sh will report it as already-applied in the meantime,
+which is harmless).
+
+diff --git a/src/main/deparse.c b/src/main/deparse.c
+index d546291120..bcc364197f 100644
+--- a/src/main/deparse.c
++++ b/src/main/deparse.c
+@@ -223,6 +223,12 @@ SEXP deparse1w(SEXP call, bool abbrev, int opts)
+     return deparse1WithCutoff(call, abbrev, R_print.cutoff, backtick, opts, -1);
+ }
+ 
++static void deparse_cleanup(void *data)
++{
++    LocalParseData *l = (LocalParseData *) data;
++    R_FreeStringBuffer(&(l->buffer));
++}
++
+ static SEXP deparse1WithCutoff(SEXP call, bool abbrev, int cutoff,
+ 			       bool backtick, int opts, int nlines)
+ {
+@@ -261,6 +267,14 @@ static SEXP deparse1WithCutoff(SEXP call, bool abbrev, int cutoff,
+     localData.opts = opts;
+     localData.strvec = R_NilValue;
+ 
++    /* Set up a context to free the heap-allocated buffer when an error
++       signalled during deparsing unwinds past this frame */
++    RCNTXT cntxt;
++    begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &deparse_cleanup;
++    cntxt.cenddata = &localData;
++
+     PrintDefaults(); /* from global options() */
+     savedigits = R_print.digits;
+     R_print.digits = DBL_DIG;/* MAX precision */
+@@ -309,6 +323,7 @@ static SEXP deparse1WithCutoff(SEXP call, bool abbrev, int cutoff,
+ 	warning(_("deparse may be not be source()able in R < 2.7.0"));
+ #endif
+     /* somewhere lower down might have allocated ... */
++    endcontext(&cntxt);
+     R_FreeStringBuffer(&(localData.buffer));
+     UNPROTECT(1);
+     return svec;
+diff --git a/src/main/gram.c b/src/main/gram.c
+index 25fb7e7a79..02eeb76c97 100644
+--- a/src/main/gram.c
++++ b/src/main/gram.c
+@@ -5684,15 +5684,21 @@ int isValidName(const char *name)
+ 	/* This is not necessarily correct for stateful MBCS */
+ 	mbstate_t mb_st;
+ 	mbs_init(&mb_st);
+-	used = Mbrtowc(&wc, p, n, &mb_st); p += used; n -= used;
+-	if(used == 0) return 0;
++	/* mbrtowc, not Mbrtowc: an undecodable string is not a valid name,
++	   and must not signal an error, as this is reached while deparsing
++	   calls for error messages */
++	used = mbrtowc(&wc, p, n, &mb_st);
++	if((int) used <= 0) return 0;
++	p += used; n -= used;
+ 	if (wc != L'.' && !iswalpha(wc) ) return 0;
+ 	if (wc == L'.') {
+ 	    /* We don't care about other than ASCII digits */
+ 	    if(isdigit(0xff & (int)*p)) return 0;
+ 	    /* Mbrtowc(&wc, p, n, NULL); if(iswdigit(wc)) return 0; */
+ 	}
+-	while((used = Mbrtowc(&wc, p, n, &mb_st))) {
++	while(n > 0) {
++	    used = mbrtowc(&wc, p, n, &mb_st);
++	    if((int) used <= 0) break;
+ 	    if (!(iswalnum(wc) || wc == L'.' || wc == L'_')) break;
+ 	    p += used; n -= used;
+ 	}
+diff --git a/src/main/gram.y b/src/main/gram.y
+index 8a7b7d4136..2cf2d69018 100644
+--- a/src/main/gram.y
++++ b/src/main/gram.y
+@@ -3375,15 +3375,21 @@ int isValidName(const char *name)
+ 	/* This is not necessarily correct for stateful MBCS */
+ 	mbstate_t mb_st;
+ 	mbs_init(&mb_st);
+-	used = Mbrtowc(&wc, p, n, &mb_st); p += used; n -= used;
+-	if(used == 0) return 0;
++	/* mbrtowc, not Mbrtowc: an undecodable string is not a valid name,
++	   and must not signal an error, as this is reached while deparsing
++	   calls for error messages */
++	used = mbrtowc(&wc, p, n, &mb_st);
++	if((int) used <= 0) return 0;
++	p += used; n -= used;
+ 	if (wc != L'.' && !iswalpha(wc) ) return 0;
+ 	if (wc == L'.') {
+ 	    /* We don't care about other than ASCII digits */
+ 	    if(isdigit(0xff & (int)*p)) return 0;
+ 	    /* Mbrtowc(&wc, p, n, NULL); if(iswdigit(wc)) return 0; */
+ 	}
+-	while((used = Mbrtowc(&wc, p, n, &mb_st))) {
++	while(n > 0) {
++	    used = mbrtowc(&wc, p, n, &mb_st);
++	    if((int) used <= 0) break;
+ 	    if (!(iswalnum(wc) || wc == L'.' || wc == L'_')) break;
+ 	    p += used; n -= used;
+ 	}
