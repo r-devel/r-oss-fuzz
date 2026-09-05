@@ -24,6 +24,15 @@ on:
 
 permissions: read-all
 
+# Every run pushes the same r-base:address tag, so two overlapping builds
+# race and the one that finishes last wins -- which once shipped an image
+# built from an older commit than one pushed seconds earlier (back-to-back
+# PR merges, 2026-09-04).  Cancel in-flight builds so only the newest
+# trigger's image lands.
+concurrency:
+  group: base-image
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
