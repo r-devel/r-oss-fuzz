@@ -127,7 +127,8 @@ of OSS-Fuzz:
 
 | Workflow | Trigger | Does |
 |----------|---------|------|
-| [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual | builds the base image (an instrumented R) and pushes it to GHCR |
+| [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual, and pushes to `main` touching its inputs; pull requests touching them (build only, no push) | builds the base image (an instrumented R) and pushes it to GHCR |
+| [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/`, daily | checks that every patch still applies to R trunk, in order |
 | [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | pull requests   | builds the harnesses and fuzzes what the change affects |
 | [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | daily         | fuzzes every target and grows the stored corpus |
 | [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | weekly        | minimises the stored corpus |
@@ -144,6 +145,15 @@ in how R is configured. Two opt-in variables, both unset under OSS-Fuzz, do
 the work: `R_BUILD_ONLY` (build and install R, then stop — used when baking
 the base image) and `R_PREBUILT` (skip the R build, use an existing install —
 used by [`.clusterfuzzlite/build.sh`](./.clusterfuzzlite/build.sh)).
+
+Two more exist for the checks on `patches/`, which carries fixes that have not
+landed in R yet: `R_PATCH_ONLY` stops after applying the patches, and
+`R_PATCH_STRICT` turns a patch that does not apply (or has already landed)
+into a failure rather than a log line. `patches-apply.yml` uses both on every
+pull request touching `patches/` and once a day, since trunk moves daily and a
+patch can go stale without anyone touching this repository; the pull-request
+runs of `base-image.yml` use the latter to also catch a patch that applies but
+does not compile.
 
 A prebuilt R is only valid for the sanitizer and engine it was instrumented
 for. Mismatched, the harnesses would still build and run while reporting no

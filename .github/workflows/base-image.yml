@@ -8,6 +8,13 @@ name: Base image
 # The weekly schedule bounds how far the R snapshot in the image drifts behind
 # SVN trunk.  Run it manually (Actions -> Base image -> Run workflow) after
 # changing how R is built, or to pick up a newer trunk immediately.
+#
+# Pull requests that change the inputs of this image (the patches, the build
+# script, the Dockerfile) run the same build without publishing it, with
+# R_PATCH_STRICT set so a patch that no longer applies fails the run.  The
+# fast check in patches-apply.yml catches most patch problems in minutes;
+# this is the tier that also catches a patch that applies but does not
+# compile.
 
 on:
   workflow_dispatch:
@@ -21,16 +28,23 @@ on:
       - 'docker/base/**'
       - 'patches/**'
       - '.github/workflows/base-image.yml'
+  pull_request:
+    paths:
+      - 'ossfuzz.sh'
+      - 'docker/base/**'
+      - 'patches/**'
+      - '.github/workflows/base-image.yml'
 
 permissions: read-all
 
-# Every run pushes the same r-base:address tag, so two overlapping builds
-# race and the one that finishes last wins -- which once shipped an image
-# built from an older commit than one pushed seconds earlier (back-to-back
-# PR merges, 2026-09-04).  Cancel in-flight builds so only the newest
-# trigger's image lands.
+# Every publishing run pushes the same r-base:address tag, so two overlapping
+# builds race and the one that finishes last wins -- which once shipped an
+# image built from an older commit than one pushed seconds earlier
+# (back-to-back PR merges, 2026-09-04).  Cancel in-flight builds so only the
+# newest trigger's image lands.  Pull-request builds publish nothing, so each
+# gets its own group: they neither cancel a publishing build nor each other.
 concurrency:
-  group: base-image
+  group: ${{ github.event_name == 'pull_request' && format('base-image-pr-{0}', github.event.pull_request.number) || 'base-image' }}
   cancel-in-progress: true
 
 jobs:
@@ -56,16 +70,19 @@ jobs:
           df -h /
 
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push base image
+      - name: Build base image (and push it, unless this is a pull request)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/base/Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/${{ github.repository }}/r-base:address
+          build-args: |
+            R_PATCH_STRICT=${{ github.event_name == 'pull_request' && '1' || '' }}

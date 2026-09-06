@@ -43,4 +43,9 @@ RUN svn checkout --depth=infinity https://svn.r-project.org/R/trunk $SRC/r-sourc
 COPY ossfuzz.sh /opt/ossfuzz.sh
 COPY patches /opt/patches
 COPY docker/base/build-r.sh /opt/build-r.sh
+
+# Pull-request builds of this image (base-image.yml) pass R_PATCH_STRICT=1 so
+# a patch that no longer applies fails the build; the published image keeps
+# ossfuzz.sh's tolerant default.
+ARG R_PATCH_STRICT=
 RUN /opt/build-r.sh && rm -rf $SRC/r-source/.svn

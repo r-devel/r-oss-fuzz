@@ -1,0 +1,67 @@
+name: Patches apply
+
+# Fast check that every patch in patches/ still applies to R trunk, in
+# filename order, exactly as ossfuzz.sh applies them when the base image is
+# built.  patches/ carries fixes that have not landed in R yet, and trunk
+# moves daily, so a patch can stop applying (context drift) or become
+# redundant (the fix landed) without anyone touching this repository.
+# ossfuzz.sh deliberately tolerates both when building the image, so that
+# one stale patch cannot take every fuzz target down; this check is where
+# they are supposed to fail instead, loudly and early.
+#
+# Runs on pull requests that change the patches or the script applying them,
+# and daily an hour before the batch run.  It does not build R: a patch that
+# applies but does not compile is caught by the pull-request runs of
+# base-image.yml, which build the full image without publishing it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'patches/**'
+      - 'ossfuzz.sh'
+      - '.github/workflows/patches-apply.yml'
+  schedule:
+    # Daily at 01:00 UTC, an hour before cflite-batch.yml.
+    - cron: '0 1 * * *'
+
+permissions: read-all
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Mirror the OSS-Fuzz layout ossfuzz.sh expects: the R source lives at
+      # $SRC/r-source.  $WORK is only referenced, never written, in this mode.
+      - name: Export R trunk
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          command -v svn >/dev/null || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends subversion
+          }
+          mkdir -p "$SRC"
+          # svn.r-project.org is occasionally unreachable from the runners;
+          # a failed export is retried rather than reported as a patch problem.
+          for attempt in 1 2 3; do
+            rm -rf "$SRC/r-source"
+            if svn export --quiet https://svn.r-project.org/R/trunk "$SRC/r-source"; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 60
+          done
+          echo "trunk revision: $(svn info --show-item revision https://svn.r-project.org/R/trunk)"
+
+      - name: Apply patches in order
+        env:
+          SRC: ${{ runner.temp }}/src
+          WORK: ${{ runner.temp }}/work
+          R_PATCH_ONLY: 1
+          R_PATCH_STRICT: 1
+        run: ./ossfuzz.sh
