@@ -26,7 +26,8 @@ unserialize target, batch run 34017923207; the leaking input lives in
 the stored corpus, so every batch run replays it at startup and stops
 with exit code 77).
 
-Upstream status: r-devel/r-svn PR #327; not yet reported on R Bugzilla.
+Upstream status: reported as R Bugzilla bug 19161 with this fix
+attached (also r-devel/r-svn PR #327).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
