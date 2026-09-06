@@ -27,7 +27,14 @@ R_SOURCE="${R_SOURCE:-$SRC/r-source}"
 #   R_PREBUILT=<dir>   use an already-installed R at <dir>, skip the R build
 #   R_BUILD_ONLY=1     build and install R, then stop (no harnesses, no $OUT)
 #
-# Both are unset in the OSS-Fuzz build, which builds R from source as usual.
+# Two more serve the CI checks on patches/ (.github/workflows/patches-apply.yml
+# and the pull-request runs of base-image.yml):
+#
+#   R_PATCH_STRICT=1   a patch that does not apply, or is already applied,
+#                      fails the build instead of being reported and skipped
+#   R_PATCH_ONLY=1     apply the patches, then stop before configuring R
+#
+# All four are unset in the OSS-Fuzz build, which builds R from source as usual.
 R_PREFIX="${R_PREFIX:-$WORK/r-install}"
 
 ########################################################################
@@ -57,8 +64,9 @@ else
     # crash out restores forward progress until the real fix lands.
     #
     # A patch that no longer applies is reported but does NOT fail the
-    # build.  R trunk moves daily and one stale patch should not take
-    # down every target.  Two failure modes are worth telling apart
+    # build (unless $R_PATCH_STRICT asks for that, which only the CI
+    # checks do).  R trunk moves daily and one stale patch should not
+    # take down every target.  Two failure modes are worth telling apart
     # in the log:
     #
     #   "already applied"  the fix landed upstream -- delete the patch
@@ -82,6 +90,19 @@ else
             fi
         done
         echo "ossfuzz.sh: patches: $n_applied applied, $n_already already applied, $n_failed failed"
+
+        # The CI checks want the opposite of the tolerance above: a patch
+        # that no longer applies, or has landed upstream, must fail there
+        # so it gets rebased or deleted before it reaches a real build.
+        if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
+            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) patch(es) above" >&2
+            exit 1
+        fi
+    fi
+
+    if [ -n "${R_PATCH_ONLY:-}" ]; then
+        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches applied, stopping before the R build"
+        exit 0
     fi
 
     # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
