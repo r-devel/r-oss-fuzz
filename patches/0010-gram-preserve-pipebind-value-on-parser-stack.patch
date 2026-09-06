@@ -1,0 +1,101 @@
+Fix a use-after-free in the parser for the experimental '=>' pipe-bind
+syntax, so the parse target stops crashing on inputs that combine
+'lhs |> var => expr' with anything that triggers a garbage collection
+before the enclosing reduction.
+
+xxpipe() in gram.y builds the call (function(var) expr)(lhs) for the
+'=>' form and returns it without PRESERVE_SV, unlike every other reduce
+action.  The value is then reachable only from the malloc'ed bison
+value stack, which the collector does not scan, so any collection
+before the enclosing rule reduces frees it.  The lexer itself can
+trigger one: a literal such as .1L warns, and warning() evaluates the
+R-level .signalSimpleWarning hook, whose argument matching allocates.
+The next reduction (here the '=' chain after the pipe) hands the freed
+cell to lang3()/PROTECT:
+
+    ==14702==ERROR: AddressSanitizer: heap-use-after-free
+    READ of size 8 ... in CHK memory.c:160
+        #1 Rf_protect memory.c
+        #2 Rf_list2 / Rf_lang3
+        #4 xxbinary gram.c
+        #5 Rf_yyparse gram.c
+    freed by thread T0 here:
+        #1 ReleasePage <- TryToReleasePages <- RunGenCollect <- R_gc_internal
+        #5 CONS_NR <- Rf_matchArgs_NR <- ... <- vsignalWarning <- Rf_warning
+        #21 NumericValue gram.c <- yylex <- Rf_yyparse
+
+Preserve the value and release lhs/rhs as the fall-through path does
+(gram.y and the checked-in gram.c), and add a gctorture regression test
+to tests/reg-tests-1e.R.  Present since r80504 (R 4.2.0).
+
+Found by fuzzing R with AFL++ + AddressSanitizer (ClusterFuzzLite parse
+target, which enables _R_USE_PIPEBIND_; a crashing input in the stored
+corpus stops the target at startup on every batch run).
+
+Upstream status: reported as R Bugzilla bug 19162 with this fix
+attached (also r-devel/r-svn PR #329).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/gram.c b/src/main/gram.c
+index 25fb7e7a79..f405cff606 100644
+--- a/src/main/gram.c
++++ b/src/main/gram.c
+@@ -3588,7 +3588,12 @@ static SEXP xxpipe(SEXP lhs, SEXP rhs, YYLTYPE *lloc_rhs)
+ 	    SEXP alist = list1(R_MissingArg);
+ 	    SET_TAG(alist, var);
+ 	    SEXP fun = lang4(R_FunctionSymbol, alist, expr, R_NilValue);
+-	    return lang2(fun, lhs);
++	    /* the result stays on the parser stack until the next
++	       reduction, so it must be preserved like any other value */
++	    PRESERVE_SV(ans = lang2(fun, lhs));
++	    RELEASE_SV(lhs);
++	    RELEASE_SV(rhs);
++	    return ans;
+ 	}
+ 
+ 	/* check for placeholder in the RHS function */
+diff --git a/src/main/gram.y b/src/main/gram.y
+index 8a7b7d4136..458bcd2a40 100644
+--- a/src/main/gram.y
++++ b/src/main/gram.y
+@@ -1279,7 +1279,12 @@ static SEXP xxpipe(SEXP lhs, SEXP rhs, YYLTYPE *lloc_rhs)
+ 	    SEXP alist = list1(R_MissingArg);
+ 	    SET_TAG(alist, var);
+ 	    SEXP fun = lang4(R_FunctionSymbol, alist, expr, R_NilValue);
+-	    return lang2(fun, lhs);
++	    /* the result stays on the parser stack until the next
++	       reduction, so it must be preserved like any other value */
++	    PRESERVE_SV(ans = lang2(fun, lhs));
++	    RELEASE_SV(lhs);
++	    RELEASE_SV(rhs);
++	    return ans;
+ 	}
+ 
+ 	/* check for placeholder in the RHS function */
+diff --git a/tests/reg-tests-1e.R b/tests/reg-tests-1e.R
+index f6ab73955a..8282d167d7 100644
+--- a/tests/reg-tests-1e.R
++++ b/tests/reg-tests-1e.R
+@@ -3710,6 +3710,21 @@ stopifnot(identical(L00, ksmooth(x,y, x.points=NULL)),
+ 
+ 
+ 
++## parsing '<lhs> |> <var> => <expr>' left the reduced call unprotected on the
++## parser stack, so a GC before the enclosing reduction could free it
++## (found by fuzzing; '=>' is still opt-in, and stays enabled once seen)
++Sys.setenv("_R_USE_PIPEBIND_" = "true")
++gctorture(TRUE)
++e <- parse(text = "x |> b => f(b) + { y <- 1; y <- 1; y <- 1; y <- 1; y <- 1 }",
++           keep.source = FALSE)
++gctorture(FALSE)
++Sys.unsetenv("_R_USE_PIPEBIND_")
++ex <- quote((function(b) f(b))(x)); ex[[1]] <- ex[[1]][[2]] # no `(` call
++stopifnot(identical(e[[1]][[2]], ex))
++## gave garbage (or a crash) for the LHS of '+' in R <= 4.6.x
++
++
++
+ ## keep at end
+ rbind(last =  proc.time() - .pt,
+       total = proc.time())
