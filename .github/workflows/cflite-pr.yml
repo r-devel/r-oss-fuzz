@@ -4,20 +4,23 @@ name: ClusterFuzzLite PR
 # and briefly fuzzes the targets affected by the change, so a broken or
 # crashing harness is caught before it merges.
 #
-# This is what actually gates changes today.  The CIFuzz workflow does the
-# equivalent job via Google's infrastructure, but only once the `r` project
-# has been merged into google/oss-fuzz.
+# DISABLED (2026-09): the `r` project is live on OSS-Fuzz, and pull requests
+# are gated by cifuzz.yml, which builds the real project definition.  This
+# workflow is kept manual-only so it can be re-enabled by restoring the
+# trigger below; the base image it depends on is still built.
+#
+#  pull_request:
+#    paths:
+#      - 'harnesses/**'
+#      - 'dictionaries/**'
+#      - 'options/**'
+#      - 'seeds/**'
+#      - 'ossfuzz.sh'
+#      - '.clusterfuzzlite/**'
+#      - '.github/workflows/cflite-pr.yml'
 
 on:
-  pull_request:
-    paths:
-      - 'harnesses/**'
-      - 'dictionaries/**'
-      - 'options/**'
-      - 'seeds/**'
-      - 'ossfuzz.sh'
-      - '.clusterfuzzlite/**'
-      - '.github/workflows/cflite-pr.yml'
+  workflow_dispatch:
 
 permissions: read-all
 

@@ -10,7 +10,7 @@ name: Patches apply
 # they are supposed to fail instead, loudly and early.
 #
 # Runs on pull requests that change the patches or the script applying them,
-# and daily an hour before the batch run.  It does not build R: a patch that
+# and daily.  It does not build R: a patch that
 # applies but does not compile is caught by the pull-request runs of
 # base-image.yml, which build the full image without publishing it.
 
@@ -22,7 +22,7 @@ on:
       - 'ossfuzz.sh'
       - '.github/workflows/patches-apply.yml'
   schedule:
-    # Daily at 01:00 UTC, an hour before cflite-batch.yml.
+    # Daily at 01:00 UTC.
     - cron: '0 1 * * *'
 
 permissions: read-all
