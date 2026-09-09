@@ -1,25 +1,28 @@
 name: CIFuzz
 
-# CIFuzz builds the `r` project as defined in google/oss-fuzz, so it cannot
-# work until that project is merged (google/oss-fuzz#15952).  Until then it
-# would fail on every pull request, so it is manual-only; pull requests are
-# fuzzed by cflite-pr.yml instead, which needs nothing from upstream.
+# Fuzzes pull requests through OSS-Fuzz's CIFuzz: builds the upstream `r`
+# project definition (google/oss-fuzz/projects/r) with this pull request's
+# checkout of the harnesses in place of the clone, and briefly fuzzes the
+# targets affected by the change, so a broken or crashing harness is caught
+# before it merges.
 #
-# When the upstream project lands, restore the pull_request trigger below and
-# decide whether to keep both -- CIFuzz exercises the real OSS-Fuzz project
-# definition, which ClusterFuzzLite does not.
-#
-#  pull_request:
-#    paths:
-#      - 'harnesses/**'
-#      - 'dictionaries/**'
-#      - 'options/**'
-#      - 'seeds/**'
-#      - 'ossfuzz.sh'
-#      - '.github/workflows/cifuzz.yml'
+# Because it runs the real project definition, R is built from source on
+# every run -- around an hour on a GitHub-hosted runner.  That is the price
+# of exercising exactly what OSS-Fuzz builds, including the patches in
+# patches/: a patch that applies but does not compile fails here.  (A patch
+# that no longer applies is caught in minutes by patches-apply.yml.)
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'harnesses/**'
+      - 'dictionaries/**'
+      - 'options/**'
+      - 'seeds/**'
+      - 'patches/**'
+      - 'ossfuzz.sh'
+      - '.github/workflows/cifuzz.yml'
 
 permissions: read-all
 jobs:
@@ -37,11 +40,19 @@ jobs:
           language: c
       - name: Run Fuzzers
         uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
+        # The decompress and unserialize targets can be asked for gigabytes
+        # by a crafted input, and some regex patterns make TRE backtrack for
+        # a very long time; both are expected behaviour rather than
+        # regressions, and reporting them would fail nearly every run and
+        # train reviewers to ignore this check.  Memory-safety bugs, which
+        # are the point, are still reported.
         with:
           oss-fuzz-project-name: 'r'
           fuzz-seconds: 300
           language: c
           output-sarif: true
+          report-timeouts: false
+          report-ooms: false
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v4
         if: failure() && steps.build.outcome == 'success'

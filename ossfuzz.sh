@@ -18,114 +18,98 @@
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R_SOURCE="${R_SOURCE:-$SRC/r-source}"
 
-# Where R gets installed.  Two optional knobs let the expensive R build be
-# hoisted out of the per-run build, which is what the ClusterFuzzLite setup
-# does (see docker/base/): a base image runs this script with $R_BUILD_ONLY
-# to bake an instrumented R into the image, and each CI run then re-runs it
-# with $R_PREBUILT pointing at that tree, so only the harnesses compile.
+# Where R gets installed.
 #
-#   R_PREBUILT=<dir>   use an already-installed R at <dir>, skip the R build
-#   R_BUILD_ONLY=1     build and install R, then stop (no harnesses, no $OUT)
-#
-# Two more serve the CI checks on patches/ (.github/workflows/patches-apply.yml
-# and the pull-request runs of base-image.yml):
+# Two optional knobs serve the CI check on patches/
+# (.github/workflows/patches-apply.yml):
 #
 #   R_PATCH_STRICT=1   a patch that does not apply, or is already applied,
 #                      fails the build instead of being reported and skipped
 #   R_PATCH_ONLY=1     apply the patches, then stop before configuring R
 #
-# All four are unset in the OSS-Fuzz build, which builds R from source as usual.
+# Both are unset in the OSS-Fuzz build, which builds R from source as usual.
 R_PREFIX="${R_PREFIX:-$WORK/r-install}"
 
 ########################################################################
 # 1. Build and install R
 ########################################################################
-if [ -n "${R_PREBUILT:-}" ]; then
-    echo "ossfuzz.sh: using prebuilt R at $R_PREBUILT"
-    R_PREFIX="$R_PREBUILT"
-    if [ ! -x "$R_PREFIX/bin/Rscript" ]; then
-        echo "ossfuzz.sh: no R install found at $R_PREFIX" >&2
+cd "$R_SOURCE"
+
+########################################################################
+# Local patches
+########################################################################
+# patches/ carries fixes that have not landed in R yet, applied in
+# filename order (hence the numeric prefixes -- one patch may depend
+# on an earlier one).
+#
+# These are not cosmetic.  Fuzzing an R with a known crash is worse
+# than it sounds: libFuzzer replays the entire stored corpus at
+# startup, so a single crashing input stops a target from fuzzing at
+# all, and no amount of CI configuration changes that.  Patching the
+# crash out restores forward progress until the real fix lands.
+#
+# A patch that no longer applies is reported but does NOT fail the
+# build (unless $R_PATCH_STRICT asks for that, which only the CI
+# checks do).  R trunk moves daily and one stale patch should not
+# take down every target.  Two failure modes are worth telling apart
+# in the log:
+#
+#   "already applied"  the fix landed upstream -- delete the patch
+#   "does not apply"   context drifted -- the bug is probably still
+#                      live, so the patch needs rebasing
+if [ -d "$REPO/patches" ]; then
+    n_applied=0; n_already=0; n_failed=0
+    for p in "$REPO"/patches/*.patch; do
+        [ -e "$p" ] || continue
+        name=$(basename "$p")
+        if patch -p1 --dry-run --force --silent < "$p" >/dev/null 2>&1; then
+            patch -p1 --force --silent < "$p" >/dev/null
+            echo "ossfuzz.sh: patch $name: applied"
+            n_applied=$((n_applied + 1))
+        elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
+            echo "ossfuzz.sh: patch $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+            n_already=$((n_already + 1))
+        else
+            echo "ossfuzz.sh: patch $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
+            n_failed=$((n_failed + 1))
+        fi
+    done
+    echo "ossfuzz.sh: patches: $n_applied applied, $n_already already applied, $n_failed failed"
+
+    # The CI checks want the opposite of the tolerance above: a patch
+    # that no longer applies, or has landed upstream, must fail there
+    # so it gets rebased or deleted before it reaches a real build.
+    if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
+        echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) patch(es) above" >&2
         exit 1
     fi
-else
-    cd "$R_SOURCE"
-
-    ####################################################################
-    # Local patches
-    ####################################################################
-    # patches/ carries fixes that have not landed in R yet, applied in
-    # filename order (hence the numeric prefixes -- one patch may depend
-    # on an earlier one).
-    #
-    # These are not cosmetic.  Fuzzing an R with a known crash is worse
-    # than it sounds: libFuzzer replays the entire stored corpus at
-    # startup, so a single crashing input stops a target from fuzzing at
-    # all, and no amount of CI configuration changes that.  Patching the
-    # crash out restores forward progress until the real fix lands.
-    #
-    # A patch that no longer applies is reported but does NOT fail the
-    # build (unless $R_PATCH_STRICT asks for that, which only the CI
-    # checks do).  R trunk moves daily and one stale patch should not
-    # take down every target.  Two failure modes are worth telling apart
-    # in the log:
-    #
-    #   "already applied"  the fix landed upstream -- delete the patch
-    #   "does not apply"   context drifted -- the bug is probably still
-    #                      live, so the patch needs rebasing
-    if [ -d "$REPO/patches" ]; then
-        n_applied=0; n_already=0; n_failed=0
-        for p in "$REPO"/patches/*.patch; do
-            [ -e "$p" ] || continue
-            name=$(basename "$p")
-            if patch -p1 --dry-run --force --silent < "$p" >/dev/null 2>&1; then
-                patch -p1 --force --silent < "$p" >/dev/null
-                echo "ossfuzz.sh: patch $name: applied"
-                n_applied=$((n_applied + 1))
-            elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
-                echo "ossfuzz.sh: patch $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
-                n_already=$((n_already + 1))
-            else
-                echo "ossfuzz.sh: patch $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
-                n_failed=$((n_failed + 1))
-            fi
-        done
-        echo "ossfuzz.sh: patches: $n_applied applied, $n_already already applied, $n_failed failed"
-
-        # The CI checks want the opposite of the tolerance above: a patch
-        # that no longer applies, or has landed upstream, must fail there
-        # so it gets rebased or deleted before it reaches a real build.
-        if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
-            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) patch(es) above" >&2
-            exit 1
-        fi
-    fi
-
-    if [ -n "${R_PATCH_ONLY:-}" ]; then
-        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches applied, stopping before the R build"
-        exit 0
-    fi
-
-    # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
-    # them.  The C/C++ compiler links the sanitizer runtime.
-    ./configure \
-        CC="$CC" \
-        CXX="$CXX" \
-        CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
-        CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
-        CPPFLAGS="" \
-        FFLAGS="" \
-        FCFLAGS="" \
-        LDFLAGS="$CFLAGS -lgfortran" \
-        --prefix="$R_PREFIX" \
-        --enable-R-shlib \
-        --with-x=no \
-        --disable-java \
-        --enable-strict-barrier \
-        --without-recommended-packages
-
-    make -j"$(nproc)"
-    make install
 fi
+
+if [ -n "${R_PATCH_ONLY:-}" ]; then
+    echo "ossfuzz.sh: R_PATCH_ONLY set -- patches applied, stopping before the R build"
+    exit 0
+fi
+
+# Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
+# them.  The C/C++ compiler links the sanitizer runtime.
+./configure \
+    CC="$CC" \
+    CXX="$CXX" \
+    CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
+    CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
+    CPPFLAGS="" \
+    FFLAGS="" \
+    FCFLAGS="" \
+    LDFLAGS="$CFLAGS -lgfortran" \
+    --prefix="$R_PREFIX" \
+    --enable-R-shlib \
+    --with-x=no \
+    --disable-java \
+    --enable-strict-barrier \
+    --without-recommended-packages
+
+make -j"$(nproc)"
+make install
 
 R_HOME="$R_PREFIX/lib/R"
 R_INCLUDE="$R_HOME/include"
@@ -141,12 +125,6 @@ for lib in libgfortran.so.5 libquadmath.so.0; do
         cp "$(readlink -f "$src")" "$R_LIB_DIR/$lib"
     fi
 done
-
-# Base-image mode: R is built and staged, and there is nothing else to do.
-if [ -n "${R_BUILD_ONLY:-}" ]; then
-    echo "ossfuzz.sh: R_BUILD_ONLY set -- R installed at $R_PREFIX, stopping"
-    exit 0
-fi
 
 # Bundle R_HOME into $OUT so the runner can find it: Rf_initEmbeddedR needs
 # it for base package data, encodings, etc.
@@ -215,9 +193,8 @@ mkdir -p "$SEED_STAGE/unserialize"
 # surface bugs in the bundled TRE engine, whose dormant upstream means
 # each fix must be hand-patched into R.  That triage load should be opted
 # into deliberately, once the initial targets have settled -- promoting a
-# target is just deleting its name here.  ClusterFuzzLite is not so
-# constrained (findings stay within this repository's CI), so
-# .clusterfuzzlite/build.sh clears the list and keeps fuzzing everything.
+# target is just deleting its name here.  Until then a deferred target is
+# not fuzzed anywhere; run it locally (see README) when TRE changes.
 DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep}"
 
 for src in "$REPO"/harnesses/*.c; do
