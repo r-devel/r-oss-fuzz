@@ -2,8 +2,18 @@ name: ClusterFuzzLite batch
 
 # Continuous fuzzing: runs every target for a while and merges anything new
 # into the stored corpus, so coverage accumulates instead of restarting from
-# the seed corpus each time.  This is what keeps the harnesses exercised while
-# the OSS-Fuzz integration is pending.
+# the seed corpus each time.  This is what kept the harnesses exercised while
+# the OSS-Fuzz integration was pending.
+#
+# DISABLED (2026-09): continuous fuzzing now happens on OSS-Fuzz, so the
+# schedule below is commented out and the workflow is manual-only.  Note
+# that the deferred targets (DEFERRED_TARGETS in ossfuzz.sh) were fuzzed
+# only here; until they are promoted to OSS-Fuzz, a manual run of this
+# workflow is the way to exercise them.
+#
+#  schedule:
+#    # Daily at 02:00 UTC.
+#    - cron: '0 2 * * *'
 #
 # Corpora persist through ClusterFuzzLite's GitHub Actions filestore (the
 # Actions cache).  That is subject to the cache size limit and eviction; if
@@ -12,9 +22,6 @@ name: ClusterFuzzLite batch
 
 on:
   workflow_dispatch:
-  schedule:
-    # Daily at 02:00 UTC.
-    - cron: '0 2 * * *'
 
 permissions: read-all
 

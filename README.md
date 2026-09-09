@@ -35,8 +35,9 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
 | `agrep` \*     | `agrep` / `agrepl` — TRE approximate (edit-distance) matching |
 
-Targets marked \* are currently fuzzed only by ClusterFuzzLite (this
-repository's CI), not by OSS-Fuzz proper. OSS-Fuzz findings land in a public
+Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
+manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see
+below. OSS-Fuzz findings land in a public
 tracker with a 90-day disclosure clock, and the regex targets mostly surface
 bugs in the bundled TRE engine — whose upstream is dormant, so every fix must
 be hand-patched into R. That triage load is worth opting into deliberately
@@ -121,17 +122,28 @@ printf -- '-I%s/include\n-DR_NO_REMAP=1\n' "$(R RHOME)" > compile_flags.txt
 
 ## Continuous integration
 
-Fuzzing runs from this repository's own CI via
-[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/), independently
-of OSS-Fuzz:
+Continuous fuzzing happens on OSS-Fuzz, which builds trunk from source daily.
+Pull requests are fuzzed by [`cifuzz.yml`](./.github/workflows/cifuzz.yml),
+which runs OSS-Fuzz
+[CIFuzz](https://google.github.io/oss-fuzz/getting-started/continuous-integration/)
+against the real project definition (`projects/r` in `google/oss-fuzz`) with
+this repository swapped for the pull request's checkout. That builds R from
+source on every run (around an hour on a hosted runner) but tests a pull
+request exactly as OSS-Fuzz will build it.
+
+Before the `r` project was accepted upstream, fuzzing ran from this
+repository's own CI via
+[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/). Those workflows
+are kept but **disabled** (manual-only, their triggers commented out in the
+files) so they can be revived if needed:
 
 | Workflow | Trigger | Does |
 |----------|---------|------|
 | [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual, and pushes to `main` touching its inputs; pull requests touching them (build only, no push) | builds the base image (an instrumented R) and pushes it to GHCR |
 | [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/`, daily | checks that every patch still applies to R trunk, in order |
-| [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | pull requests   | builds the harnesses and fuzzes what the change affects |
-| [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | daily         | fuzzes every target and grows the stored corpus |
-| [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | weekly        | minimises the stored corpus |
+| [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | manual (disabled) | builds the harnesses and fuzzes what the change affects |
+| [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | manual (disabled) | fuzzes every target and grows the stored corpus; the only way the deferred targets get fuzzed |
+| [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | manual (disabled) | minimises the stored corpus |
 
 Building R takes the better part of an hour, which is far too slow to repeat
 per pull request. So `base-image.yml` builds R once into a container image and
@@ -165,12 +177,6 @@ Corpora persist through ClusterFuzzLite's GitHub Actions filestore (the
 Actions cache), which is subject to size limits and eviction. If the corpus
 becomes valuable enough to guarantee, move it to a dedicated storage
 repository via the actions' `storage-repo` input.
-
-[`cifuzz.yml`](./.github/workflows/cifuzz.yml) runs OSS-Fuzz
-[CIFuzz](https://google.github.io/oss-fuzz/getting-started/continuous-integration/),
-which does the same job for pull requests but builds the upstream `r` project
-definition — so it cannot work until that project is merged into
-`google/oss-fuzz`. It is manual-only until then.
 
 ## License
 

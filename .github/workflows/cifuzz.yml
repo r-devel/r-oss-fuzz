@@ -1,25 +1,22 @@
 name: CIFuzz
 
-# CIFuzz builds the `r` project as defined in google/oss-fuzz, so it cannot
-# work until that project is merged (google/oss-fuzz#15952).  Until then it
-# would fail on every pull request, so it is manual-only; pull requests are
-# fuzzed by cflite-pr.yml instead, which needs nothing from upstream.
-#
-# When the upstream project lands, restore the pull_request trigger below and
-# decide whether to keep both -- CIFuzz exercises the real OSS-Fuzz project
-# definition, which ClusterFuzzLite does not.
-#
-#  pull_request:
-#    paths:
-#      - 'harnesses/**'
-#      - 'dictionaries/**'
-#      - 'options/**'
-#      - 'seeds/**'
-#      - 'ossfuzz.sh'
-#      - '.github/workflows/cifuzz.yml'
+# CIFuzz builds the `r` project as defined in google/oss-fuzz
+# (google/oss-fuzz#15952, merged 2026-09-03) with this pull request's checkout
+# in place of the clone, so a pull request is tested exactly as OSS-Fuzz will
+# build it.  That means R is compiled from source on every run -- around an
+# hour on a hosted runner.  cflite-pr.yml used to gate pull requests cheaply
+# against the prebuilt base image; it is now manual-only.
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'harnesses/**'
+      - 'dictionaries/**'
+      - 'options/**'
+      - 'seeds/**'
+      - 'ossfuzz.sh'
+      - '.github/workflows/cifuzz.yml'
 
 permissions: read-all
 jobs:
@@ -37,11 +34,15 @@ jobs:
           language: c
       - name: Run Fuzzers
         uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
+        # As in cflite-pr.yml: timeouts and OOMs are expected behaviour for
+        # the decompression and deserialization targets, not regressions.
         with:
           oss-fuzz-project-name: 'r'
           fuzz-seconds: 300
           language: c
           output-sarif: true
+          report-timeouts: false
+          report-ooms: false
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v4
         if: failure() && steps.build.outcome == 'success'

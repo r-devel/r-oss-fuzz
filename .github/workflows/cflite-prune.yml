@@ -3,12 +3,16 @@ name: ClusterFuzzLite prune
 # Minimises the stored corpus: drops inputs that no longer contribute coverage
 # so the corpus stays small enough to load quickly and cheap to store.  Without
 # this the corpus grows without bound and every batch run pays for it.
+#
+# DISABLED (2026-09) along with cflite-batch.yml: nothing adds to the stored
+# corpus any more, so there is nothing to prune on a schedule.
+#
+#  schedule:
+#    # Mondays at 04:00 UTC, after a week of batch runs have added to it.
+#    - cron: '0 4 * * 1'
 
 on:
   workflow_dispatch:
-  schedule:
-    # Mondays at 04:00 UTC, after a week of batch runs have added to it.
-    - cron: '0 4 * * 1'
 
 permissions: read-all
 
