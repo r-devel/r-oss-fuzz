@@ -1,0 +1,219 @@
+Fix an out-of-bounds read in unserialize() when a version-3 stream
+labels a native string with the platform's wide-character encoding.
+
+ReadChar() reads a length-delimited string into a buffer of exactly
+length + 1 bytes (a VLA on the C stack for short strings) and, when
+converting it to UTF-8 fails, hands the buffer to reEnc3() to render
+the invalid-string warning.  reEnc3() decides from the encoding name
+whether its input is a wide string, and for the platform's wchar_t
+encoding (UCS-4LE/UCS-4BE, UTF-16LE on Windows) measures it with
+wcslen(), which scans in sizeof(wchar_t) steps until it finds a wide
+NUL.  A crafted stream declares that encoding and supplies a string
+shorter than one wchar_t, so wcslen() runs off the end of the buffer:
+
+    ==41067==ERROR: AddressSanitizer: dynamic-stack-buffer-overflow
+    READ of size 72 at 0x00016b389382 thread T0
+        #0 wcslen
+        #1 reEncodeIconv         src/main/sysutils.c:2241
+        #2 Rf_reEnc3             src/main/sysutils.c:2394
+        #3 invalid_utf8_warning  src/main/serialize.c:1697
+        #4 ReadChar              src/main/serialize.c:1753
+        #5 ReadItem_Recursive    src/main/serialize.c:2028
+        #9 R_Unserialize         src/main/serialize.c:2294
+
+Add reEnc4(), which takes the input byte length explicitly, and use it
+where the caller already knows that length: the serialization warning
+path, the invalid-CHARSXP diagnostics in envir.c, and the buffered
+wide-string conversion in sysutils.c.  reEnc3() stays as the wrapper
+for NUL-terminated inputs.  Also reject an embedded NUL in a version-3
+encoding name, in both unserialize() and infoRDS().
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz
+unserialize target, testcase 5161193048965120, reproducible).  A
+30-byte ASCII-format stream is enough to trigger it.
+
+Upstream status: reported on R Bugzilla bug 19047 (comment 6,
+attachment 3851) with this fix attached (also r-devel/r-svn PR #339).
+The upstream patch also adds a regression test to tests/reg-tests-1b.R,
+left out here so this carry patch does not go stale with that file.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/gnuwin32/Rdll.hide b/src/gnuwin32/Rdll.hide
+index 440cf1601ff..53bbf15b942 100644
+--- a/src/gnuwin32/Rdll.hide
++++ b/src/gnuwin32/Rdll.hide
+@@ -544,6 +544,7 @@
+  Rf_promiseArgs
+  Rf_qchisq_appr
+  Rf_reEnc3
++ Rf_reEnc4
+  Rf_readS3VarsFromFrame
+  Rf_regcomp
+  Rf_regerror
+diff --git a/src/include/Defn.h b/src/include/Defn.h
+index 8577edc69cc..6ef896ffe51 100644
+--- a/src/include/Defn.h
++++ b/src/include/Defn.h
+@@ -2448,6 +2448,8 @@ SEXP Rf_installTrChar(SEXP);
+ 
+ const wchar_t *wtransChar(SEXP x); /* from sysutils.c */
+ const char *Rf_reEnc3(const char *x, const char *fromcode, const char *tocode, int subst);
++const char *Rf_reEnc4(const char *x, size_t length, const char *fromcode,
++		     const char *tocode, int subst);
+ 
+ #define mbs_init(x) memset(x, 0, sizeof(mbstate_t))
+ size_t Mbrtowc(wchar_t *wc, const char *s, size_t n, mbstate_t *ps);
+diff --git a/src/include/Rinternals.h b/src/include/Rinternals.h
+index d06ca3fc9fd..63289e2a7e1 100644
+--- a/src/include/Rinternals.h
++++ b/src/include/Rinternals.h
+@@ -1016,6 +1016,7 @@ void R_orderVector1(int *indx, int n, SEXP x,       Rboolean nalast, Rboolean de
+ #define readS3VarsFromFrame	Rf_readS3VarsFromFrame
+ #define reEnc			Rf_reEnc
+ #define reEnc3			Rf_reEnc3
++#define reEnc4			Rf_reEnc4
+ #define S3Class                 Rf_S3Class
+ #define ScalarComplex		Rf_ScalarComplex
+ #define ScalarInteger		Rf_ScalarInteger
+diff --git a/src/main/envir.c b/src/main/envir.c
+index 8cacbbb86f4..b2bf475b94d 100644
+--- a/src/main/envir.c
++++ b/src/main/envir.c
+@@ -4726,7 +4726,7 @@ static void reportInvalidString(SEXP cval, int actionWhenInvalid)
+ 	else if (IS_LATIN1(cval))
+ 	    from = "CP1252";
+ 
+-	native_str = reEnc3(CHAR(cval), from, "", 1);
++	native_str = reEnc4(CHAR(cval), LENGTH(cval), from, "", 1);
+ 	if (actionWhenInvalid == 1)
+ 	    warning("invalid string %s", native_str);
+ 	else if (actionWhenInvalid == 2)
+diff --git a/src/main/serialize.c b/src/main/serialize.c
+index e5e749a79c8..979a8fbe404 100644
+--- a/src/main/serialize.c
++++ b/src/main/serialize.c
+@@ -1684,17 +1684,18 @@ static char *native_fromcode(R_inpstream_t stream)
+     return from;
+ }
+ 
+-static void invalid_utf8_warning(const char *buf, const char *from)
++static void invalid_utf8_warning(const char *buf, int length, const char *from)
+ {
+     const void *vmax = vmaxget();
+     const char *native_buf;
+ 
+     if (utf8Valid(buf)) {
+-	native_buf = reEnc3(buf, "UTF-8", "", 1);
++	native_buf = reEnc4(buf, length, "UTF-8", "", 1);
+ 	warning(_("input string '%s' cannot be translated from '%s' to UTF-8, but is valid UTF-8"),
+ 		native_buf, from);
+     } else {
+-	native_buf = reEnc(reEnc3(buf, from, "UTF-8", 1), CE_UTF8, CE_NATIVE, 2);
++	native_buf = reEnc(reEnc4(buf, length, from, "UTF-8", 1),
++			   CE_UTF8, CE_NATIVE, 2);
+ 	warning(_("input string '%s' cannot be translated to UTF-8, is it valid in '%s'?"),
+ 		native_buf, from);
+     }
+@@ -1750,7 +1751,7 @@ ReadChar(R_inpstream_t stream, char *buf, int length, int levs)
+ 	if (known_to_be_utf8) {
+ 	    /* nat2nat_obj is converting to UTF-8, no need to use nat2utf8_obj */
+ 	    stream->nat2utf8_obj = (void *)-1;
+-	    invalid_utf8_warning(buf, native_fromcode(stream));
++	    invalid_utf8_warning(buf, length, native_fromcode(stream));
+ 	}
+     }
+     /* try converting to UTF-8 */
+@@ -1769,7 +1770,7 @@ ReadChar(R_inpstream_t stream, char *buf, int length, int levs)
+ 	SEXP ans = ConvertChar(stream->nat2utf8_obj, buf, length, CE_UTF8);
+ 	if (ans != R_NilValue)
+ 	    return ans;
+-	invalid_utf8_warning(buf, native_fromcode(stream));
++	invalid_utf8_warning(buf, length, native_fromcode(stream));
+     }
+     /* no translation possible */
+     return mkCharLenCE(buf, length, CE_NATIVE);
+@@ -2272,6 +2273,8 @@ SEXP R_Unserialize(R_inpstream_t stream)
+ 	    error(_("invalid length of encoding name"));
+ 	InString(stream, stream->native_encoding, nelen);
+ 	stream->native_encoding[nelen] = '\0';
++	if (memchr(stream->native_encoding, '\0', nelen))
++	    error(_("embedded nul in encoding name"));
+ 	break;
+     }
+     default:
+@@ -2364,6 +2367,8 @@ attribute_hidden SEXP R_SerializeInfo(R_inpstream_t stream)
+ 	char nbuf[nelen + 1];
+ 	InString(stream, nbuf, nelen);
+ 	nbuf[nelen] = '\0';
++	if (memchr(nbuf, '\0', nelen))
++	    error(_("embedded nul in encoding name"));
+ 	SET_VECTOR_ELT(ans, 4, mkString(nbuf));
+     }
+     setAttrib(ans, R_NamesSymbol, names);
+diff --git a/src/main/sysutils.c b/src/main/sysutils.c
+index 4ff6debe7a5..af72e9187bd 100644
+--- a/src/main/sysutils.c
++++ b/src/main/sysutils.c
+@@ -2165,7 +2165,9 @@ static int translateToWchar(const char *ans, R_StringBuffer *cbuff,
+     if(ttype == NT_FROM_NATIVE) Riconv_close(obj);
+     if (mustWork && failed) {
+ 	const void *vmax = vmaxget();
+-	const char *native_buf = reEnc3(cbuff->data, TO_WCHAR, "", 2);
++	const char *native_buf = reEnc4(cbuff->data,
++				       (size_t) (outbuf - cbuff->data),
++				       TO_WCHAR, "", 2);
+ 
+ 	/* copy to truncate (and mark as truncated) */
+ 	char err_buff[256];
+@@ -2223,7 +2225,7 @@ const wchar_t *wtransChar2(SEXP x)
+ 	return wcopyAndFreeStringBuffer(&cbuff);
+ }
+ 
+-static int reEncodeIconv(const char *x, R_StringBuffer *cbuff,
++static int reEncodeIconv(const char *x, size_t length, R_StringBuffer *cbuff,
+                          const char *fromcode, const char *tocode, int subst)
+ {
+     void * obj;
+@@ -2237,10 +2239,7 @@ static int reEncodeIconv(const char *x, R_StringBuffer *cbuff,
+     R_AllocStringBuffer(0, cbuff);
+ top_of_loop:
+     inbuf = x;
+-    if (fromWchar)
+-	inb = wcslen((wchar_t *)inbuf) * sizeof(wchar_t);
+-    else
+-	inb = strlen(inbuf);
++    inb = length;
+     outbuf = cbuff->data; outb = cbuff->bufsize - 3;
+     /* First initialize output */
+     Riconv (obj, NULL, NULL, &outbuf, &outb);
+@@ -2348,7 +2347,7 @@ static int reEncode(const char *x, R_StringBuffer *cbuff,
+     default: return 1;
+     }
+ 
+-    return reEncodeIconv(x, cbuff, fromcode, tocode, subst);
++    return reEncodeIconv(x, strlen(x), cbuff, fromcode, tocode, subst);
+ }
+ 
+ /* This may return a R_alloc-ed result, so the caller has to manage the
+@@ -2389,9 +2388,19 @@ void reEnc2(const char *x, char *y, int ny,
+ attribute_hidden
+ const char *reEnc3(const char *x,
+                    const char *fromcode, const char *tocode, int subst)
++{
++    size_t length = !strcmp(fromcode, TO_WCHAR)
++	? wcslen((wchar_t *) x) * sizeof(wchar_t) : strlen(x);
++    return reEnc4(x, length, fromcode, tocode, subst);
++}
++
++/* As reEnc3, with the input length supplied explicitly. */
++attribute_hidden
++const char *reEnc4(const char *x, size_t length,
++		   const char *fromcode, const char *tocode, int subst)
+ {
+     R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+-    if (reEncodeIconv(x, &cbuff, fromcode, tocode, subst)) return x;
++    if (reEncodeIconv(x, length, &cbuff, fromcode, tocode, subst)) return x;
+     size_t res = strlen(cbuff.data) + 1;
+     char *p = R_alloc(res, 1);
+     memcpy(p, cbuff.data, res);
