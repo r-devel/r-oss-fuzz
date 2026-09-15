@@ -27,6 +27,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | Target         | Exercises                                              |
 |----------------|--------------------------------------------------------|
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
+| `eval` (opt-in) | restricted interpreted evaluation, closures, promises, and vector operations |
 | `unserialize`  | `unserialize()` / `readRDS` — the deserializer (security-critical) |
 | `grep` \*      | TRE and PCRE2 regex engines, plus `sub()`              |
 | `coerce`       | string→type conversion (`as.numeric`, `as.complex`, `as.logical`, `type.convert`) |
@@ -50,6 +51,11 @@ All targets embed R via `Rf_initEmbeddedR` and share the setup in
 so the sanitizers' own handlers stay in place and traps crash cleanly,
 suppress warnings, and wrap each call in `R_ToplevelExec` to catch R's
 longjmp-on-error).
+
+The experimental `eval` target requires `ENABLE_EVAL_FUZZER=1` at build time,
+including under ClusterFuzzLite. It evaluates a limited R subset in a fresh
+environment and needs external process isolation. See [the evaluation guide](docs/eval.md)
+for its restrictions, behavioral checks, and the restricted local Docker launcher.
 
 The harnesses also cap R's vector heap by defaulting `R_MAX_VSIZE=1Gb`
 (`4Gb` for `decompress`), so a crafted length field cannot allocate the
