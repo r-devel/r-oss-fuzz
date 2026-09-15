@@ -34,9 +34,9 @@ capability restrictions, not a blacklist applied to source text. For example,
 JIT compilation and default package attachment are disabled at initialization.
 
 Inputs are limited to 8 KiB; malformed UTF-8 and embedded NULs are rejected. A
-post-parse tree walk has depth and node budgets of 64 and 1024. R's parser can reject deeply nested
-input before that walk. R's vector heap defaults to 64 MiB. A cooperative CPU
-limit of 50 ms and elapsed limit of 100 ms cover evaluation of each input, and
+post-parse tree walk has depth and node budgets of 64 and 1024. R's parser can
+reject deeply nested input before that walk. R's vector heap defaults to 64 MiB.
+A cooperative CPU limit of 50 ms and elapsed limit of 100 ms covers each input,
 the harness clears the limit after both success and error. These checks depend
 on R interrupt points and cannot stop arbitrary native code. The fuzzer options
 also specify a five-second timeout and a 1024 MiB RSS limit.
