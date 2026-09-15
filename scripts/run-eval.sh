@@ -51,5 +51,6 @@ exec docker run --rm --init \
     --signal=KILL "$eval_seconds" \
     /out/eval /work/corpus \
     -artifact_prefix=/work/artifacts/ \
-    -max_total_time="$((eval_seconds - 5))" -timeout=5 -rss_limit_mb=1024 \
+    -max_total_time="$((eval_seconds - 5))" -max_len=8192 \
+    -timeout=5 -rss_limit_mb=1024 \
     "$@"
