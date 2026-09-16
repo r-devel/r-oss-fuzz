@@ -166,6 +166,14 @@ static void fuzz_do_eval(void *data)
     Rf_eval(ed->call, ed->env);
 }
 
+/* Evaluate malformed-input-heavy targets without printing each expected
+ * R error. R_tryEvalSilent installs its own top-level error context. */
+static void fuzz_eval_silent(SEXP call, SEXP env)
+{
+    int error = 0;
+    R_tryEvalSilent(call, env, &error);
+}
+
 /*
  * Stage per-iteration inputs under a toplevel context.
  *

@@ -1,0 +1,1 @@
+4UTF-16 big endian input

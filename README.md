@@ -34,6 +34,12 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
 | `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
 | `agrep` \*     | `agrep` / `agrepl` — TRE approximate (edit-distance) matching |
+| `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
+| `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |
+| `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
+| `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
+| `rd`           | `tools::parse_Rd()` — R documentation markup parsing  |
+| `character`    | character widths, substrings, quoting, names, and raw conversion |
 
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
 manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see

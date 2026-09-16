@@ -1,0 +1,6 @@
+0Package: fuzz
+Version: 1.0.0
+Title: A small package
+Description: A first line
+    and a continuation line.
+Encoding: UTF-8
