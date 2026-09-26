@@ -254,6 +254,13 @@ DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
 
+    # Evaluation needs a separately isolated local runner and is experimental.
+    # Keep it opt-in even when ClusterFuzzLite clears DEFERRED_TARGETS.
+    if [ "$name" = eval ] && [ "${ENABLE_EVAL_FUZZER:-0}" != 1 ]; then
+        echo "ossfuzz.sh: target eval: experimental -- set ENABLE_EVAL_FUZZER=1"
+        continue
+    fi
+
     case " $DEFERRED_TARGETS " in
         *" $name "*)
             echo "ossfuzz.sh: target $name: deferred -- skipping"
