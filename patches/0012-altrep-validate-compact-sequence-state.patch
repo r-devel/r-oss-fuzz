@@ -30,8 +30,8 @@ this is a robustness fix (fail cleanly rather than read out of bounds).
 
 Found by fuzzing R with libFuzzer + AddressSanitizer (unserialize target).
 
-Upstream status: r-devel/r-svn PR #336; R Bugzilla report drafted, not yet
-filed.
+Upstream status: r-devel/r-svn PR #336; R Bugzilla bug 19047 (attachment
+3842).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
 as already-applied in the meantime, which is harmless).
 

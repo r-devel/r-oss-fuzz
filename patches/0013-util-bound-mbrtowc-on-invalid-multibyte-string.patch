@@ -19,18 +19,19 @@ the string:
         #5 Rf_ComplexFromString           coerce.c:281
 
 oss-fuzz testcase 5931425707393024 reaches this through as.complex() in a
-UTF-8 locale.  The fault needs the string to end near a heap page, so it
-is not deterministic (ClusterFuzz marks the testcase a one-time crasher);
-the over-read -- passing mbrtowc() a count larger than the string -- is
-present on every call.
+UTF-8 locale, and 5487840193216512 through type.convert() (ruleout_types()
+calls isBlankString() on what Strtod() left unparsed).  The fault needs the
+string to end near a heap page, so it is not deterministic (ClusterFuzz
+marks both testcases one-time crashers); the over-read -- passing
+mbrtowc() a count larger than the string -- is present on every call.
 
 Bound each mbrtowc() call by the bytes actually left before the
 terminating nul, tracked in a dedicated counter that cannot underflow.
 
 Found by fuzzing R with libFuzzer + AddressSanitizer (coerce target).
 
-Upstream status: r-devel/r-svn PR #337; R Bugzilla report drafted, not yet
-filed.
+Upstream status: r-devel/r-svn PR #337; R Bugzilla bug 19165 (attachment
+3843).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
 as already-applied in the meantime, which is harmless).
 
