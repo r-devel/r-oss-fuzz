@@ -1,0 +1,8 @@
+package="Package:"
+version="Version:"
+title="Title:"
+description="Description:"
+encoding="Encoding:"
+continuation="\x0a "
+record="\x0a\x0a"
+colon=":"

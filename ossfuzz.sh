@@ -156,8 +156,8 @@ cp -a "$R_PREFIX" "$OUT/r-install"
 ########################################################################
 # 2. Stage seed corpora
 ########################################################################
-# Static seeds live in this repo under seeds/<target>/.  RDS seeds for the
-# unserialize target are generated below using the R we just built, and
+# Static seeds live in this repo under seeds/<target>/.  Seeds that require
+# actual binary encodings are generated below using the R we just built, and
 # staged into the same seeds/<target>/ layout so the packaging loop treats
 # every target uniformly.
 SEED_STAGE="$WORK/seeds"
@@ -167,13 +167,41 @@ if [ -d "$REPO/seeds" ]; then
     cp -a "$REPO/seeds/." "$SEED_STAGE/"
 fi
 
+export R_HOME
+export LD_LIBRARY_PATH="$R_LIB_DIR:${LD_LIBRARY_PATH:-}"
+
+# Generate typed binary streams for the io target. Keeping this here rather
+# than spelling bytes as text in seeds/io ensures the corpus contains real
+# NUL terminators and platform-independent numeric encodings.
+mkdir -p "$SEED_STAGE/io"
+( cd "$SEED_STAGE/io" && \
+  "$R_PREFIX/bin/Rscript" --vanilla -e '
+    seed <- function(name, selector, payload)
+      writeBin(c(charToRaw(selector), payload), name)
+    seed("raw.bin",       "0", charToRaw("abcdefghijklmno"))
+    seed("integer8.bin",  "1",
+         writeBin(c(0L, 1L, 127L, -128L, -1L), raw(),
+                  size = 1, endian = "big"))
+    seed("integer32.bin", "2",
+         writeBin(c(0L, 1L, -1L, .Machine$integer.max), raw(),
+                  size = 4, endian = "little"))
+    seed("real32.bin",    "3",
+         writeBin(c(0, 1, -1, Inf, NaN), raw(), size = 4, endian = "big"))
+    seed("real64.bin",    "4",
+         writeBin(c(0, 1, -1, Inf, NaN), raw(), size = 8, endian = "little"))
+    seed("complex.bin",   "5",
+         writeBin(c(0+0i, 1-2i, Inf+NaN*1i), raw(),
+                  size = 16, endian = "big"))
+    seed("character.bin", "6", writeBin(c("first", "second"), raw()))
+    seed("logical.bin",   "7",
+         writeBin(c(FALSE, TRUE, NA), raw(), size = 4, endian = "little"))
+  ' 2>/dev/null )
+
 # Generate minimal valid RDS files for the unserialize target.  The harness
 # passes bytes straight to unserialize(), which expects the raw serialization
 # stream, so the seeds must be written with compress = FALSE (saveRDS
 # gzip-compresses by default, and unserialize() rejects gzip data outright).
 # Emit binary v3, binary v2, and ASCII variants to seed those format branches.
-export R_HOME
-export LD_LIBRARY_PATH="$R_LIB_DIR:${LD_LIBRARY_PATH:-}"
 mkdir -p "$SEED_STAGE/unserialize"
 ( cd "$SEED_STAGE/unserialize" && \
   "$R_PREFIX/bin/Rscript" --vanilla -e '
@@ -215,10 +243,13 @@ mkdir -p "$SEED_STAGE/unserialize"
 # surface bugs in the bundled TRE engine, whose dormant upstream means
 # each fix must be hand-patched into R.  That triage load should be opted
 # into deliberately, once the initial targets have settled -- promoting a
-# target is just deleting its name here.  ClusterFuzzLite is not so
-# constrained (findings stay within this repository's CI), so
-# .clusterfuzzlite/build.sh clears the list and keeps fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep}"
+# target is just deleting its name here.  rd waits on two R bugs its first
+# runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
+# (reached through \encoding{}) and parse_Rd() never returning on an
+# unterminated \Sexpr.  ClusterFuzzLite is not so constrained (findings stay
+# within this repository's CI), so .clusterfuzzlite/build.sh clears the list
+# and keeps fuzzing everything.
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
