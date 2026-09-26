@@ -1,0 +1,71 @@
+Stop Mbrtowc() from reading past the end of an invalid multibyte string
+while rendering it for an error message, so coercions such as
+as.complex() of hostile input stop crashing.
+
+Mbrtowc() (src/main/util.c, exported as Rf_mbrtowc) builds a readable
+rendering of an invalid string one character at a time.  The loop passes
+mbrtowc() the caller's fixed count -- isBlankString() and the other
+callers pass R_MB_CUR_MAX, not strlen(s) -- and decrements it in step
+with the read pointer.  Once the count and pointer fall out of step the
+count underflows to a huge size_t, so mbrtowc() is told far more bytes
+remain than actually do and glibc's UTF-8 converter reads past the end of
+the string:
+
+    ==4251==ERROR: AddressSanitizer: SEGV on unknown address (wild-addr-read)
+        #0 utf8_internal_loop_single       (glibc iconv)
+        #2 __mbrtowc                        (glibc)
+        #3 Rf_mbrtowc                      util.c:1627
+        #4 Rf_isBlankString               util.c:453
+        #5 Rf_ComplexFromString           coerce.c:281
+
+oss-fuzz testcase 5931425707393024 reaches this through as.complex() in a
+UTF-8 locale, and 5487840193216512 through type.convert() (ruleout_types()
+calls isBlankString() on what Strtod() left unparsed).  The fault needs the
+string to end near a heap page, so it is not deterministic (ClusterFuzz
+marks both testcases one-time crashers); the over-read -- passing
+mbrtowc() a count larger than the string -- is present on every call.
+
+Bound each mbrtowc() call by the bytes actually left before the
+terminating nul, tracked in a dedicated counter that cannot underflow.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (coerce target).
+
+Upstream status: r-devel/r-svn PR #337; R Bugzilla bug 19165 (attachment
+3843).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
+as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/util.c b/src/main/util.c
+index e9f852fe03..885ac78410 100644
+--- a/src/main/util.c
++++ b/src/main/util.c
+@@ -1622,19 +1622,26 @@ size_t Mbrtowc(wchar_t *wc, const char *s, size_t n, mbstate_t *ps)
+ 	size_t sz = 4*strlen(s) + 1;
+ 	char err[sz], *q;
+ 	const char *p;
++	/* Bound each mbrtowc() by the bytes actually left before the
++	   terminating nul.  The previous code passed the caller's fixed
++	   count 'n' (typically R_MB_CUR_MAX) and decremented it in step with
++	   'p'; once it fell out of step it underflowed to a huge size_t, so
++	   mbrtowc() was told far more bytes were available than remained and
++	   could read past the end of 's' into unmapped memory. */
++	size_t nb = strlen(s);
+ 	for(p = s, q = err; *p; ) {
+ 	    /* don't do the first to keep ps state straight */
+-	    if(p > s) used = mbrtowc(NULL, p, n, ps);
++	    if(p > s) used = mbrtowc(NULL, p, nb, ps);
+ 	    if(used == 0) break;
+ 	    else if((int) used > 0) {
+ 		memcpy(q, p, used);
+ 		p += used;
+ 		q += used; sz -= used;
+-		n -= used;
++		nb -= used;
+ 	    } else {
+ 		snprintf(q, sz, "<%02x>", (unsigned char) *p++);
+ 		q += 4; sz -= 4;
+-		n--;
++		nb--;
+ 	    }
+ 	}
+ 	*q = '\0';
