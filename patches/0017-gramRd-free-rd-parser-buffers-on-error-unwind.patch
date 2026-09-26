@@ -33,7 +33,8 @@ context parseRd() already sets up.  gramRd.c is regenerated with bison
 Found by probing the rd target of r-devel/r-oss-fuzz PR #16 with
 libFuzzer + LeakSanitizer.
 
-Upstream status: r-devel/r-svn PR #344.
+Upstream status: r-devel/r-svn PR #344; R Bugzilla bug 19184 (attachment
+3872).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 

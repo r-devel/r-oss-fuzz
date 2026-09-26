@@ -30,7 +30,8 @@ path calls the same cleanup after ending the context.
 Found by fuzzing R with libFuzzer + LeakSanitizer (CIFuzz dcf target on
 r-devel/r-oss-fuzz PR #16, run 35039123751).
 
-Upstream status: r-devel/r-svn PR #343.
+Upstream status: r-devel/r-svn PR #343; R Bugzilla bug 19183 (attachment
+3871).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 

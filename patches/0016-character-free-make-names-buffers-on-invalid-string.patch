@@ -23,7 +23,8 @@ an error unwinds.
 Found by probing the character target of r-devel/r-oss-fuzz PR #16 with
 libFuzzer + LeakSanitizer (make.names selector, 3-byte input).
 
-Upstream status: r-devel/r-svn PR #342.
+Upstream status: r-devel/r-svn PR #342; R Bugzilla bug 19182 (attachment
+3870).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
