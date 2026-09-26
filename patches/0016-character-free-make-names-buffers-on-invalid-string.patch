@@ -1,0 +1,68 @@
+Fix a memory leak in make.names() on a name that is not valid in the
+current multibyte locale, so the character target stops tripping
+LeakSanitizer on inputs such as "a\xff".
+
+do_makenames() (src/main/character.c) copies each name into an
+R_Calloc()ed buffer and frees it at the end of the loop iteration.  In a
+multibyte locale only the first character is validated before that
+copy; the mbstowcs() check further down then signals "invalid multibyte
+string" and the long jump skips the R_Free():
+
+    ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 3 byte(s) in 1 object(s) allocated from:
+        #0 calloc
+        #1 R_chk_calloc memory.c
+        #2 do_makenames character.c
+    SUMMARY: AddressSanitizer: 3 byte(s) leaked in 1 allocation(s).
+
+Allocate the buffer (and the one used to append "." to a reserved word)
+with R_alloc() instead; the loop already brackets each iteration with
+vmaxget()/vmaxset(), and the error handler's vmaxset() releases it when
+an error unwinds.
+
+Found by probing the character target of r-devel/r-oss-fuzz PR #16 with
+libFuzzer + LeakSanitizer (make.names selector, 3-byte input).
+
+Upstream status: r-devel/r-svn PR #342; R Bugzilla bug 19182 (attachment
+3870).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/character.c b/src/main/character.c
+index d2fc10cb68..fe38a8d97f 100644
+--- a/src/main/character.c
++++ b/src/main/character.c
+@@ -1034,12 +1034,15 @@ attribute_hidden SEXP do_makenames(SEXP call, SEXP op, SEXP args, SEXP env)
+ 		if (l >= 1 && isdigit(0xff & (int) This[1])) need_prefix = TRUE;
+ 	    } else if (!isalpha(0xff & (int) This[0])) need_prefix = TRUE;
+ 	}
++	/* R_alloc() rather than R_Calloc(): the invalid multibyte string
++	   error below would otherwise leak the buffer.  vmaxset() at the
++	   end of each iteration releases it. */
+ 	if (need_prefix) {
+-	    tmp = R_Calloc(l+2, char);
++	    tmp = R_alloc(l+2, sizeof(char));
+ 	    strcpy(tmp, "X");
+ 	    strcat(tmp, translateChar(STRING_ELT(arg, i)));
+ 	} else {
+-	    tmp = R_Calloc(l+1, char);
++	    tmp = R_alloc(l+1, sizeof(char));
+ 	    strcpy(tmp, translateChar(STRING_ELT(arg, i)));
+ 	}
+ 	if (mbcslocale) {
+@@ -1066,14 +1069,11 @@ attribute_hidden SEXP do_makenames(SEXP call, SEXP op, SEXP args, SEXP env)
+ 	SET_STRING_ELT(ans, i, mkChar(tmp));
+ 	/* do we have a reserved word?  If so the name is invalid */
+ 	if (!isValidName(tmp)) {
+-	    /* FIXME: could use R_Realloc instead */
+-	    cbuf = CallocCharBuf(strlen(tmp) + 1);
++	    cbuf = R_alloc(strlen(tmp) + 2, sizeof(char));
+ 	    strcpy(cbuf, tmp);
+ 	    strcat(cbuf, ".");
+ 	    SET_STRING_ELT(ans, i, mkChar(cbuf));
+-	    R_Free(cbuf);
+ 	}
+-	R_Free(tmp);
+ 	vmaxset(vmax);
+     }
+     UNPROTECT(1);
