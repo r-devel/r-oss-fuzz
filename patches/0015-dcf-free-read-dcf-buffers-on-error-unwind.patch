@@ -1,0 +1,169 @@
+Fix a memory leak in read.dcf() when malformed input makes it signal an
+error, so the dcf target stops tripping LeakSanitizer on its first few
+dozen inputs.
+
+do_readDCF() (src/main/dcf.c) malloc()s an 8 KB line buffer and compiles
+five TRE regexps before its read loop, and releases them only after the
+loop.  The loop signals ordinary R errors for malformed input ("Line
+starting '...' is malformed!", "Found continuation line starting '...'
+at begin of record."), and each one leaks the buffer plus the regexps'
+internal allocations.  The only cleanup context closed the connection,
+and was set up only when do_readDCF() had opened it itself (the harness
+passes an already-open textConnection):
+
+    ==1994==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 8096 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 do_readDCF dcf.c:132
+    Indirect leak of 8 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 tre_compile tre-compile.c:1976
+        #2 tre_regcompb regcomp.c:150
+        #3 do_readDCF dcf.c:144
+    SUMMARY: AddressSanitizer: 19408 byte(s) leaked in 46 allocation(s).
+
+Always set up the cleanup context, with a small struct (as cat() does)
+pointing at the buffer and the regexps; the cleanup frees them and
+closes the connection only if do_readDCF() opened it, and the normal
+path calls the same cleanup after ending the context.
+
+Found by fuzzing R with libFuzzer + LeakSanitizer (CIFuzz dcf target on
+r-devel/r-oss-fuzz PR #16, run 35039123751).
+
+Upstream status: r-devel/r-svn PR #343.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/dcf.c b/src/main/dcf.c
+index 57403a1c4a..47faa15c9b 100644
+--- a/src/main/dcf.c
++++ b/src/main/dcf.c
+@@ -52,10 +52,28 @@ static SEXP mkCharUTF8sub(const char *s)
+     return mkCharCE(repaired, CE_UTF8);
+ }
+ 
+-static void con_cleanup(void *data)
++/* What do_readDCF() has to release however it exits: the error() calls
++   in its read loop would otherwise leak the line buffer and the compiled
++   regexps, and leave open a connection it opened itself. */
++typedef struct dcf_info {
++    Rconnection con;
++    bool wasopen;
++    char **buf;			/* the line buffer, which realloc() may move */
++    regex_t *regex[5];
++    int nregex;			/* how many of regex[] have been compiled */
++} dcf_info;
++
++static void dcf_cleanup(void *data)
+ {
+-    Rconnection con = data;
+-    if(con->isopen) con->close(con);
++    dcf_info *pdi = (dcf_info *) data;
++
++    for(int i = 0; i < pdi->nregex; i++)
++	tre_regfree(pdi->regex[i]);
++    pdi->nregex = 0;
++    free(*pdi->buf);
++    *pdi->buf = NULL;
++    if(!pdi->wasopen && pdi->con->isopen)
++	pdi->con->close(pdi->con);
+ }
+ 
+ static bool field_is_foldable_p(const char *, SEXP);
+@@ -92,13 +110,18 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+     int nwhat, nret, nc, nr, m, k, lastm, need, i, n_eblanklines = 0;
+     bool blank_skip, field_skip = false;
+     int whatlen, dynwhat, buflen = 8096; // was 100, but that re-alloced often
+-    char *line, *buf;
++    char *line, *buf = NULL;
+     regex_t blankline, contline, trailblank, regline, eblankline;
+     regmatch_t regmatch[1];
+     SEXP file, what, what2, retval, retval2, dims, dimnames;
+     Rconnection con = NULL;
+     bool wasopen, is_eblankline;
+     RCNTXT cntxt;
++    dcf_info di = {
++	.buf = &buf,
++	.regex = { &blankline, &trailblank, &contline, &regline, &eblankline },
++	.nregex = 0
++    };
+ 
+     SEXP fold_excludes;
+     bool field_fold = true, has_fold_excludes;
+@@ -110,14 +133,16 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+     file = CAR(args);
+     con = getConnection(asInteger(file));
+     wasopen = con->isopen;
+-    if(!wasopen) {
+-	if(!con->open(con)) error(_("cannot open the connection"));
+-	/* Set up a context which will close the connection on error */
+-	begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
+-		     R_NilValue, R_NilValue);
+-	cntxt.cend = &con_cleanup;
+-	cntxt.cenddata = con;
+-    }
++    if(!wasopen && !con->open(con))
++	error(_("cannot open the connection"));
++    /* Set up a context which will close the connection if we opened it,
++       and free the line buffer and regexps, on error */
++    di.con = con;
++    di.wasopen = wasopen;
++    begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &dcf_cleanup;
++    cntxt.cenddata = &di;
+     if(!con->canread) error(_("cannot read from this connection"));
+ 
+     args = CDR(args);
+@@ -143,6 +168,7 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+     tre_regcompb(&contline, "^[ \t]+", REG_EXTENDED);
+     tre_regcompb(&regline, "^[^:]+:[ \t]*", REG_EXTENDED);
+     tre_regcompb(&eblankline, "^[ \f\n\r\t\v]+\\.[ \f\n\r\t\v]*$", REG_EXTENDED);
++    di.nregex = 5;
+ 
+     k = 0;
+     lastm = -1; /* index of the field currently being recorded */
+@@ -205,11 +231,11 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+ 			need += (int) strlen(line + offset) + n_eblanklines;
+ 		    }
+ 		    if(buflen < need) {
++			/* on failure, dcf_cleanup() frees the old buffer */
+ 			char *tmp = (char *) realloc(buf, need);
+-			if(!tmp) {
+-			    free(buf);
++			if(!tmp)
+ 			    error(_("could not allocate memory for 'read.dcf'"));
+-			} else buf = tmp;
++			buf = tmp;
+ 			buflen = need;
+ 		    }
+ 		    strcpy(buf, CHAR(STRING_ELT(retval, lastm + nwhat * k)));
+@@ -287,10 +313,9 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+ 			need = (int) (Rf_strchr(line, ':') - line + 1);
+ 			if(buflen < need){
+ 			    char *tmp = (char *) realloc(buf, need);
+-			    if(!tmp) {
+-				free(buf);
++			    if(!tmp)
+ 				error(_("could not allocate memory for 'read.dcf'"));
+-			    } else buf = tmp;
++			    buf = tmp;
+ 			    buflen = need;
+ 			}
+ 			strncpy(buf, line, Rf_strchr(line, ':') - line);
+@@ -324,13 +349,8 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+ 	}
+     }
+     vmaxset(vmax);
+-    if(!wasopen) {endcontext(&cntxt); con->close(con);}
+-    free(buf);
+-    tre_regfree(&blankline);
+-    tre_regfree(&contline);
+-    tre_regfree(&trailblank);
+-    tre_regfree(&regline);
+-    tre_regfree(&eblankline);
++    endcontext(&cntxt);
++    dcf_cleanup(&di);
+ 
+     if(!blank_skip) k++;
+ 
