@@ -34,8 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # R's canonical source is SVN trunk, matching the OSS-Fuzz project definition.
-RUN svn checkout --depth=infinity https://svn.r-project.org/R/trunk $SRC/r-source \
-    && svnversion $SRC/r-source > /opt/r-svn-revision
+# The checkout is retried (and resumed) because the SVN server sometimes drops
+# the connection partway through; see checkout-r.sh.
+COPY docker/base/checkout-r.sh /opt/checkout-r.sh
+RUN /opt/checkout-r.sh
 
 # ossfuzz.sh performs the actual R build (via R_BUILD_ONLY), so the R baked in
 # here is configured identically to the R that the OSS-Fuzz build produces --
