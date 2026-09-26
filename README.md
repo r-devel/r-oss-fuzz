@@ -38,7 +38,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
-| `rd`           | `tools::parse_Rd()` — R documentation markup parsing  |
+| `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `character`    | character widths, substrings, quoting, names, and raw conversion |
 
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
@@ -48,6 +48,10 @@ tracker with a 90-day disclosure clock, and the regex targets mostly surface
 bugs in the bundled TRE engine — whose upstream is dormant, so every fix must
 be hand-patched into R. That triage load is worth opting into deliberately
 once the initial targets have settled, rather than at onboarding.
+`rd` is held back for a different reason: its first runs hit two R bugs that
+have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
+through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
+`\Sexpr`.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 

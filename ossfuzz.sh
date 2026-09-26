@@ -243,10 +243,13 @@ mkdir -p "$SEED_STAGE/unserialize"
 # surface bugs in the bundled TRE engine, whose dormant upstream means
 # each fix must be hand-patched into R.  That triage load should be opted
 # into deliberately, once the initial targets have settled -- promoting a
-# target is just deleting its name here.  ClusterFuzzLite is not so
-# constrained (findings stay within this repository's CI), so
-# .clusterfuzzlite/build.sh clears the list and keeps fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep}"
+# target is just deleting its name here.  rd waits on two R bugs its first
+# runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
+# (reached through \encoding{}) and parse_Rd() never returning on an
+# unterminated \Sexpr.  ClusterFuzzLite is not so constrained (findings stay
+# within this repository's CI), so .clusterfuzzlite/build.sh clears the list
+# and keeps fuzzing everything.
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
