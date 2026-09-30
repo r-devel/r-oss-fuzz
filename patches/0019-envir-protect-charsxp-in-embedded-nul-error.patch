@@ -43,11 +43,12 @@ target, testcase 4802858911072256).  A serialized Latin-1 string of
 30000 bytes with a nul poked into it reproduces under gctorture in a
 UTF-8 or C locale.
 
-Upstream status: r-devel/r-svn PR #347 (fix plus a regression test in
-tests/reg-tests-1e.R, left out here so this carry patch does not go
-stale with that file); not yet on R Bugzilla.  Delete this patch once
-the fix lands in R trunk (ossfuzz.sh will report it as already-applied
-in the meantime, which is harmless).
+Upstream status: reported as R Bugzilla bug 19193 with this fix
+attached (attachment 3880; also r-devel/r-svn PR #347).  The upstream
+patch also adds a regression test to tests/reg-tests-1e.R, left out
+here so this carry patch does not go stale with that file.  Delete this
+patch once the fix lands in R trunk (ossfuzz.sh will report it as
+already-applied in the meantime, which is harmless).
 
 diff --git a/src/main/envir.c b/src/main/envir.c
 index 8cacbbb86f..5321356f36 100644
