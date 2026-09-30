@@ -20,9 +20,9 @@ loaded, and R loads it through libgfortran on x86_64 Linux:
 
 Stock R on Ubuntu 20.04 reports "segfault from C stack overflow" for
 sprintf("%2147483647s", "a") and for sprintf("%.2147483647s", "a").
-glibc 2.35 and later are not affected.  Without the hooks, glibc 2.31
-and the macOS libc return -1, which slips past the length check, so
-sprintf() silently returns "" instead.
+glibc 2.32 and later are not affected (glibc bug 26211).  Without the
+hooks, glibc 2.31 and the macOS libc return -1, which slips past the
+length check, so sprintf() silently returns "" instead.
 
 Check the width before the call -- anything above MAXLINE fails the
 length check anyway, with the same error -- and lower a precision above
@@ -34,7 +34,7 @@ oss-fuzz testcase 6373137810522112 (Stack-overflow in do_sprintf); the
 minimized input is sprintf("%2147483647s", "fuzz").
 
 Upstream status: r-devel/r-svn PR #346; R Bugzilla bug 19192 (attachment
-3878).
+3879).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
 as already-applied in the meantime, which is harmless).
 
