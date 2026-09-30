@@ -33,7 +33,8 @@ way (e.g. "%.9000f").
 oss-fuzz testcase 6373137810522112 (Stack-overflow in do_sprintf); the
 minimized input is sprintf("%2147483647s", "fuzz").
 
-Upstream status: not yet reported.
+Upstream status: r-devel/r-svn PR #346; R Bugzilla bug 19192 (attachment
+3878).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
 as already-applied in the meantime, which is harmless).
 
