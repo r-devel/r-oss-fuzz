@@ -1,0 +1,77 @@
+Fix read.dcf() adding a duplicate column for every repeat of a field
+whose name contains invalid UTF-8, which made the dcf target time out.
+
+Since r90200 ("Always use UTF-8 for the DCF reader and writer"),
+do_readDCF() (src/main/dcf.c) records a previously unseen field name in
+repaired form (mkCharUTF8sub() turns "e\xfe" into "e<fe>") but keeps
+matching later lines against the raw bytes.  The repaired name never
+matches again, so each later occurrence of the field adds another
+column, and each new column reallocates and copies the whole
+field-by-record matrix.  read.dcf(all = TRUE) is unaffected, since its
+R code repairs every line first.  On an 11 KB input the default path
+built a 388 x 535 matrix where all = TRUE gives 388 x 20, taking 0.85 s
+on a release build and over a minute under ASan:
+
+    ==1570== ERROR: libFuzzer: timeout after 61 seconds
+        #4 STRING_ELT              src/main/memory.c:4132
+        #5 do_readDCF              src/main/dcf.c:301
+        #6 bcEval_loop             src/main/eval.c:8150
+       ...
+       #24 LLVMFuzzerTestOneInput  harnesses/dcf.c:56
+
+Repair the whole line as soon as it is read, as the all = TRUE code
+does, so stored field names and later lines use the same bytes.  The
+repaired copy comes from R_alloc() with exactly strlen + 1 bytes, so
+the two error paths that cut the line at 20 bytes for the message now
+check its length first.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz dcf
+target, testcase 5506677886222336).  The regression is in R-devel only
+(r90200 and later); R 4.6.1 is not affected.
+
+Upstream status: r-devel/r-svn PR #349 (not yet on R Bugzilla).  The
+upstream patch also adds a regression test to tests/reg-tests-1e.R,
+left out here so this carry patch does not go stale with that file.
+The hunks are made against a tree with patch 0015 applied, which also
+changes do_readDCF().  Delete this patch once the fix lands in R trunk
+(ossfuzz.sh will report it as already-applied in the meantime, which is
+harmless).
+
+diff --git a/src/main/dcf.c b/src/main/dcf.c
+index 47faa15c9b..29b994f24a 100644
+--- a/src/main/dcf.c
++++ b/src/main/dcf.c
+@@ -176,6 +176,13 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+     void *vmax = vmaxget();
+     char buf0[MAXELTSIZE];
+     while((line = Rconn_getline2(con, buf0, MAXELTSIZE))) {
++	/* Repair invalid UTF-8 in the whole line before matching, as the
++	   all = TRUE R code does: a new field name is recorded repaired, so
++	   matching its later occurrences against the raw bytes would fail
++	   and add a duplicate column for each.  The repaired copy comes from
++	   R_alloc() and may be shorter than 21 bytes. */
++	if(!utf8Valid(line))
++	    line = (char *) reEnc3(line, "UTF-8", "UTF-8", 1);
+ 	if(strlen(line) == 0 ||
+ 	   tre_regexecb(&blankline, line, 0, 0, 0) == 0) {
+ 	    /* A blank line.  The first one after a record ends a new
+@@ -204,7 +211,8 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+ 		/* A continuation line: wrong if at the beginning of a
+ 		   record. */
+ 		if((lastm == -1) && !field_skip) {
+-		    line[20] = '\0';
++		    if(strlen(line) > 20)
++			line[20] = '\0';
+ 		    error(_("Found continuation line starting '%s ...' at begin of record."),
+ 			  line);
+ 		}
+@@ -342,7 +350,8 @@ attribute_hidden SEXP do_readDCF(SEXP call, SEXP op, SEXP args, SEXP env)
+ 		    }
+ 		} else {
+ 		    /* Must be a regular line with no tag ... */
+-		    line[20] = '\0';
++		    if(strlen(line) > 20)
++			line[20] = '\0';
+ 		    error(_("Line starting '%s ...' is malformed!"), line);
+ 		}
+ 	    }
