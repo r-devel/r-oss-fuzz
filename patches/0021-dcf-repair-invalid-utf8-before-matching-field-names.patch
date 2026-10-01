@@ -29,8 +29,8 @@ Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz dcf
 target, testcase 5506677886222336).  The regression is in R-devel only
 (r90200 and later); R 4.6.1 is not affected.
 
-Upstream status: r-devel/r-svn PR #349 (not yet on R Bugzilla).  The
-upstream patch also adds a regression test to tests/reg-tests-1e.R,
+Upstream status: r-devel/r-svn PR #349; R Bugzilla bug 19194
+(attachment 3881).  The upstream patch also adds a regression test to tests/reg-tests-1e.R,
 left out here so this carry patch does not go stale with that file.
 The hunks are made against a tree with patch 0015 applied, which also
 changes do_readDCF().  Delete this patch once the fix lands in R trunk
