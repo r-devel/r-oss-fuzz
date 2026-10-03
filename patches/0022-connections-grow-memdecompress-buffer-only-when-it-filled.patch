@@ -1,0 +1,71 @@
+Fix memDecompress(type = "gzip") looping forever on a truncated gzip
+or zlib stream, on builds without libdeflate.
+
+R_uncompress() in gzio.h writes stream.total_out through its destLen
+argument on every return, not only on success.  do_memDecompress()
+passes outlen by reference and treats Z_BUF_ERROR as "the output
+buffer was too small", doubling outlen and retrying.  That is right
+when the buffer really filled up (total_out == buffer size), but
+inflate() also returns Z_BUF_ERROR when the input runs out before the
+end of the stream.  Then total_out is just the number of bytes decoded
+so far, independent of the buffer size, so the "doubled" size is the
+same on every pass and the loop never terminates.  Each pass
+R_alloc()s another buffer that stays live until the call returns:
+
+    ==254== ERROR: libFuzzer: out-of-memory (used: 2829Mb; limit: 2560Mb)
+    3722675704 byte(s) (98%) in 91984 allocation(s)
+        #1 Rf_allocVector3   src/main/memory.c:2895
+        #3 R_alloc           src/main/memory.c:2333
+        #4 do_memDecompress  src/main/connections.c:7303
+
+A stream that produced nothing at all (a zlib header plus two bytes)
+spins at zero bytes instead and shows up as a timeout.
+
+Track the size of the buffer just allocated separately, grow only when
+Z_BUF_ERROR comes back with that buffer completely filled, and
+otherwise fall through to the existing "internal error" report.  The
+libdeflate branch is a separate loop keyed on
+LIBDEFLATE_INSUFFICIENT_SPACE and is not affected; the OSS-Fuzz image
+has no libdeflate, so it takes the zlib path.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz
+decompress target, testcases 5726025607348224 and 6383420146778112
+(out-of-memory) and 6066205270802432 (timeout)).
+
+Upstream status: reported as R Bugzilla bug 19200 with this fix
+attached (attachment 3894; also r-devel/r-svn PR #357).  The upstream
+patch also adds a regression test to tests/reg-tests-1e.R, left out
+here so this carry patch does not go stale with that file.  Delete this
+patch once the fix lands in R trunk (ossfuzz.sh will report it as
+already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/connections.c b/src/main/connections.c
+index a4905eeecb..aa93a55337 100644
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -7340,15 +7340,20 @@ do_memDecompress(SEXP call, SEXP op, SEXP args, SEXP env)
+ 	    opt = 16;  // force gzip format
+ 	}
+ 	while(1) {
+-	    buf = (Bytef *) R_alloc(outlen, sizeof(Bytef));
+-	    // R_uncompress is in gzio.h
++	    uLong buflen = outlen;
++	    buf = (Bytef *) R_alloc(buflen, sizeof(Bytef));
++	    // R_uncompress is in gzio.h.  It sets outlen to the number of
++	    // bytes actually produced, whatever the result.
+ 	    int res = R_uncompress(buf, &outlen, p, inlen, opt);
+-	    if(res == Z_BUF_ERROR) {
+-		if(outlen < ULONG_MAX/2) {
+-		    outlen *= 2; continue;
++	    if(res == Z_BUF_ERROR && outlen == buflen) {
++		// the output buffer filled up: grow it and retry
++		if(buflen < ULONG_MAX/2) {
++		    outlen = buflen ? 2*buflen : 1; continue;
+ 		} else break;
+ 	    }
+ 	    if(res >= 0) break;
++	    // Z_BUF_ERROR with room left in the buffer means the input
++	    // ended prematurely, so a bigger buffer cannot help.
+ 	    error("internal error %d in memDecompress(%s)", res,
+ 		  "type = \"gzip\"");
+ 	}
