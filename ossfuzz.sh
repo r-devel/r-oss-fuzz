@@ -18,6 +18,11 @@
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R_SOURCE="${R_SOURCE:-$SRC/r-source}"
 
+# libdeflate is built from source here rather than installed from apt (see
+# the "Dependencies built from source" step below).  Pinned to a release tag
+# so builds are reproducible; bump deliberately.
+LIBDEFLATE_VERSION="${LIBDEFLATE_VERSION:-1.26}"
+
 # Where R gets installed.  Two optional knobs let the expensive R build be
 # hoisted out of the per-run build, which is what the ClusterFuzzLite setup
 # does (see docker/base/): a base image runs this script with $R_BUILD_ONLY
@@ -105,17 +110,60 @@ else
         exit 0
     fi
 
+    ####################################################################
+    # Dependencies built from source
+    ####################################################################
+    # R's configure uses libdeflate for memCompress()/memDecompress() and
+    # for lazy-load databases whenever the headers and library are found,
+    # which is how CRAN's macOS and Windows builds are configured.  The
+    # OSS-Fuzz image has no libdeflate, so without this step R silently
+    # takes its zlib fallback and the libdeflate branches of R's own code
+    # are never fuzzed.
+    #
+    # Built here, rather than apt-installed in the OSS-Fuzz Dockerfile,
+    # for three reasons: the fuzzers run in a different image
+    # (base-runner) that has no libdeflate.so, and a static library needs
+    # nothing shipped alongside libR.so; the library gets the same
+    # sanitizer and coverage instrumentation as R; and it keeps the
+    # project definition in google/oss-fuzz untouched.
+    LIBDEFLATE_PREFIX="$WORK/libdeflate"
+    if [ ! -f "$LIBDEFLATE_PREFIX/lib/libdeflate.a" ]; then
+        rm -rf "$WORK/libdeflate-src"
+        git -c advice.detachedHead=false clone -q --depth 1 \
+            --branch "v$LIBDEFLATE_VERSION" \
+            https://github.com/ebiggers/libdeflate.git "$WORK/libdeflate-src"
+        # No CMAKE_BUILD_TYPE: the only flags are $CFLAGS, so the library
+        # is instrumented exactly like R.  Static library only; the
+        # gzip program and tests are not needed.  PIC, because the
+        # archive is linked into the shared libR.so.
+        cmake -S "$WORK/libdeflate-src" -B "$WORK/libdeflate-src/build" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_C_FLAGS="$CFLAGS -fno-omit-frame-pointer" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_INSTALL_PREFIX="$LIBDEFLATE_PREFIX" \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DLIBDEFLATE_BUILD_SHARED_LIB=OFF \
+            -DLIBDEFLATE_BUILD_GZIP=OFF \
+            -DLIBDEFLATE_BUILD_TESTS=OFF \
+            > /dev/null
+        cmake --build "$WORK/libdeflate-src/build" -j"$(nproc)" > /dev/null
+        cmake --install "$WORK/libdeflate-src/build" > /dev/null
+    fi
+    echo "ossfuzz.sh: libdeflate $LIBDEFLATE_VERSION (static) at $LIBDEFLATE_PREFIX"
+
     # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
-    # them.  The C/C++ compiler links the sanitizer runtime.
+    # them.  The C/C++ compiler links the sanitizer runtime.  configure
+    # finds the static libdeflate through CPPFLAGS/LDFLAGS and links it
+    # into libR.so, so nothing libdeflate-related ships to the runner.
     ./configure \
         CC="$CC" \
         CXX="$CXX" \
         CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
         CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
-        CPPFLAGS="" \
+        CPPFLAGS="-I$LIBDEFLATE_PREFIX/include" \
         FFLAGS="" \
         FCFLAGS="" \
-        LDFLAGS="$CFLAGS -lgfortran" \
+        LDFLAGS="$CFLAGS -lgfortran -L$LIBDEFLATE_PREFIX/lib" \
         --prefix="$R_PREFIX" \
         --enable-R-shlib \
         --with-x=no \

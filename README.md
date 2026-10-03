@@ -10,6 +10,12 @@ them be developed and updated on their own cadence — via ordinary git
 pull requests — independently of both R (whose canonical source is SVN)
 and the `google/oss-fuzz` monorepo.
 
+Keeping it thin is a deliberate policy, not just a starting point: changes to
+the upstream project definition are proposed only when absolutely necessary.
+Anything that can live here (build steps, dependencies built from source,
+harnesses, carried patches) lives here, so that the upstream footprint stays
+at the checkout of R, the clone of this repository, and the apt list.
+
 ## Layout
 
 ```
@@ -106,6 +112,14 @@ libraries R links are already present in `base-runner`. The full apt list
 lives in the OSS-Fuzz project `Dockerfile` (`projects/r/Dockerfile` in
 `google/oss-fuzz`); adding a target that needs a new system library
 therefore requires a small change there too.
+
+One dependency is built from source instead: `ossfuzz.sh` clones a pinned
+release of [libdeflate](https://github.com/ebiggers/libdeflate) and builds a
+static library with the same sanitizer flags as R, so R's `configure` picks it
+up the way it does on CRAN's macOS and Windows builds. Static linking means
+nothing extra has to ship to `base-runner`, the library is instrumented, and
+the `google/oss-fuzz` Dockerfile stays unchanged. Bump `LIBDEFLATE_VERSION`
+in `ossfuzz.sh` to update it.
 
 ## Building locally
 
