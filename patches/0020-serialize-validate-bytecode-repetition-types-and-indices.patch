@@ -1,0 +1,55 @@
+Fix type confusion and out-of-bounds reference indices while
+unserializing bytecode.
+
+ReadBCLang() reads the type after BCREPDEF from the stream and passes
+it to allocSExp().  A malformed type can create a cons cell labelled
+as a vector, so the next garbage collection follows invalid pointers.
+The indices used by BCREPREF and BCREPDEF also reach the reps vector
+without bounds checks.  Validate both indices and accept only LANGSXP
+or LISTSXP, including their attribute variants, for a definition.
+
+Found by OSS-Fuzz's unserialize target (testcase 5865026871951360).
+The issue also reproduces in released R 4.6.1.
+
+Upstream status: proposed in r-devel/r-svn PR #348.  Its regression
+test in tests/reg-tests-1b.R is left out here so this carry patch does
+not go stale with that file.  Delete the patch after the fix lands in
+R trunk.
+
+diff --git a/src/main/serialize.c b/src/main/serialize.c
+index e5e749a79c..d601881ca5 100644
+--- a/src/main/serialize.c
++++ b/src/main/serialize.c
+@@ -2144,7 +2144,12 @@ static SEXP ReadBCLang(int type, SEXP ref_table, SEXP reps,
+ {
+     switch (type) {
+     case BCREPREF:
+-	return VECTOR_ELT(reps, InInteger(stream));
++	{
++	    int pos = InInteger(stream);
++	    if (pos < 0 || pos >= LENGTH(reps))
++		error(_("bytecode reference index out of range"));
++	    return VECTOR_ELT(reps, pos);
++	}
+     case BCREPDEF:
+     case LANGSXP:
+     case LISTSXP:
+@@ -2156,12 +2161,18 @@ static SEXP ReadBCLang(int type, SEXP ref_table, SEXP reps,
+ 	    int hasattr = false;
+ 	    if (type == BCREPDEF) {
+ 		pos = InInteger(stream);
++		if (pos < 0 || pos >= LENGTH(reps))
++		    error(_("bytecode reference index out of range"));
+ 		type = InInteger(stream);
+ 	    }
+ 	    switch (type) {
+ 	    case ATTRLANGSXP: type = LANGSXP; hasattr = TRUE; break;
+ 	    case ATTRLISTSXP: type = LISTSXP; hasattr = TRUE; break;
+ 	    }
++	    /* the BCREPDEF type comes from the stream; allocSExp would
++	       happily build a cons cell labelled as any other type */
++	    if (type != LANGSXP && type != LISTSXP)
++		error(_("ReadBCLang: invalid type %i"), type);
+ 	    PROTECT(ans = allocSExp(type));
+ 	    if (pos >= 0)
+ 		SET_VECTOR_ELT(reps, pos, ans);
