@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gfortran \
         libbz2-dev \
         libcurl4-openssl-dev \
+        libdeflate-dev \
         liblzma-dev \
         libpcre2-dev \
         libreadline-dev \
