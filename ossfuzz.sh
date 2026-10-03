@@ -134,10 +134,12 @@ else
             https://github.com/ebiggers/libdeflate.git "$WORK/libdeflate-src"
         # No CMAKE_BUILD_TYPE: the only flags are $CFLAGS, so the library
         # is instrumented exactly like R.  Static library only; the
-        # gzip program and tests are not needed.
+        # gzip program and tests are not needed.  PIC, because the
+        # archive is linked into the shared libR.so.
         cmake -S "$WORK/libdeflate-src" -B "$WORK/libdeflate-src/build" \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_C_FLAGS="$CFLAGS -fno-omit-frame-pointer" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DCMAKE_INSTALL_PREFIX="$LIBDEFLATE_PREFIX" \
             -DCMAKE_INSTALL_LIBDIR=lib \
             -DLIBDEFLATE_BUILD_SHARED_LIB=OFF \
