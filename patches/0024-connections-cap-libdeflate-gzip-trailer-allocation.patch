@@ -25,10 +25,9 @@ Found by OSS-Fuzz (testcase 5726025607348224).  The same input hit the
 zlib path's infinite loop before the fuzz image gained libdeflate; that
 fix is patch 0022 (r-svn PR #357, Bugzilla 19200).
 
-Upstream status: r-devel/r-svn PR pending (branch
-bugfix/memdecompress-libdeflate-isize); its regression test in
-tests/reg-tests-1e.R is left out here so this carry patch does not go
-stale with that file.
+Upstream status: r-devel/r-svn PR #358 (no Bugzilla report yet); its
+regression test in tests/reg-tests-1e.R is left out here so this carry
+patch does not go stale with that file.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
