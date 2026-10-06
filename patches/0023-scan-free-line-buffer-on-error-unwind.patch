@@ -1,0 +1,122 @@
+Fix a memory leak in scan() when a field fails type conversion (or any
+other error unwinds mid-scan), so the scan target stops running out of
+memory part-way through a fuzzing session.
+
+scanVector() and scanFrame() (src/main/scan.c) read fields into a local
+R_StringBuffer, allocated up front with R_AllocStringBuffer() (8 KB,
+MAXELTSIZE) and freed with R_FreeStringBuffer() only on their normal
+return.  Both run under do_scan()'s scan_cleanup context, but that
+context frees only the connection and the quote set, so every error
+signalled mid-scan -- typically "scan() expected 'a real', got ..." from
+expected() -- unwinds past the free and leaks the buffer.
+
+The scan harness calls scan() four times per input and nearly every
+fuzzed input fails type conversion, so the leak accumulates at 8 KB per
+failing call until libFuzzer's RSS limit kills the process.  The report
+shows 246,906 live 8192-byte chunks (2.0 GB, 94% of the heap), all
+allocated at scan.c:571, after 272,250 inputs:
+
+    ==248== ERROR: libFuzzer: out-of-memory (used: 2565Mb; limit: 2560Mb)
+    Live Heap Allocations: 2139375500 bytes in 280771 chunks; ...
+    2022653952 byte(s) (94%) in 246906 allocation(s)
+        #0 __interceptor_malloc
+        #1 R_AllocStringBuffer /src/r-source/src/main/memory.c:4970:23
+        #2 scanVector /src/r-source/src/main/scan.c:571:5
+        #3 do_scan /src/r-source/src/main/scan.c:1001:8
+
+Hang the buffer on LocalData, which is what do_scan() passes as the
+cleanup context's data, so scan_cleanup() frees it on the unwind too;
+scanVector() and scanFrame() clear the field before returning so it
+never points at a dead stack frame.
+
+Found by OSS-Fuzz (testcase 5836936510767104, libFuzzer_r_scan,
+2026-10-03; flagged unreproducible because it needs the accumulation,
+not any one input).
+
+Upstream status: r-devel/r-svn PR #330; R Bugzilla bug 19123 (attachment
+3773 is the same fix, filed 2026-08-04).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/scan.c b/src/main/scan.c
+index 572dbaf9ca..bc4f20e1c7 100644
+--- a/src/main/scan.c
++++ b/src/main/scan.c
+@@ -40,6 +40,7 @@
+ #include <Rconnections.h>
+ #include <errno.h>
+ #include <Print.h>
++#include "RBufferUtils.h" /* for R_StringBuffer, used in LocalData */
+ 
+ #include <rlocale.h> /* for btowc */
+ 
+@@ -82,6 +83,9 @@ typedef struct {
+     bool embedWarn;
+     bool skipNul;
+     char convbuf[100];
++    /* the string buffer scanVector/scanFrame are reading into, so the
++       scan_cleanup context can free it if an error unwinds mid-scan */
++    R_StringBuffer *sbuf;
+ } LocalData;
+ 
+ static SEXP insertString(char *str, LocalData *l)
+@@ -319,9 +323,12 @@ static void scan_cleanup(void *data)
+ 	free(ld->quoteset);
+ 	ld->quoteset = NULL;
+     }
++    if(ld->sbuf) {
++	R_FreeStringBuffer(ld->sbuf);
++	ld->sbuf = NULL;
++    }
+ }
+ 
+-#include "RBufferUtils.h"
+ 
+ /*XX  Can we pass this routine an R_StringBuffer? appears so.
+    But do we have to worry about continuation lines and whatever
+@@ -569,6 +576,7 @@ static SEXP scanVector(SEXPTYPE type, R_xlen_t maxitems, R_xlen_t maxlines,
+     else blocksize = SCAN_BLOCKSIZE;
+ 
+     R_AllocStringBuffer(0, &strBuf);
++    d->sbuf = &strBuf;
+     PROTECT(ans = allocVector(type, blocksize));
+ 
+     nprev = 0; n = 0; linesread = 0; bch = 1;
+@@ -636,11 +644,13 @@ static SEXP scanVector(SEXPTYPE type, R_xlen_t maxitems, R_xlen_t maxlines,
+     if (n == 0) {
+ 	UNPROTECT(1);
+ 	R_FreeStringBuffer(&strBuf);
++	d->sbuf = NULL;
+ 	return allocVector(type,0);
+     }
+     if (n == maxitems) {
+ 	UNPROTECT(1);
+ 	R_FreeStringBuffer(&strBuf);
++	d->sbuf = NULL;
+ 	return ans;
+     }
+ 
+@@ -672,6 +682,7 @@ static SEXP scanVector(SEXPTYPE type, R_xlen_t maxitems, R_xlen_t maxlines,
+     }
+     UNPROTECT(1);
+     R_FreeStringBuffer(&strBuf);
++    d->sbuf = NULL;
+     return bns;
+ }
+ 
+@@ -697,6 +708,7 @@ static SEXP scanFrame(SEXP what, R_xlen_t maxitems, R_xlen_t maxlines,
+     else blksize = SCAN_BLOCKSIZE;
+ 
+     R_AllocStringBuffer(0, &buf);
++    d->sbuf = &buf;
+     PROTECT(ans = allocVector(VECSXP, nc));
+     for (i = 0; i < nc; i++) {
+ 	w = VECTOR_ELT(what, i);
+@@ -845,6 +857,7 @@ static SEXP scanFrame(SEXP what, R_xlen_t maxitems, R_xlen_t maxlines,
+     }
+     UNPROTECT(1);
+     R_FreeStringBuffer(&buf);
++    d->sbuf = NULL;
+     return ans;
+ }
+ 
