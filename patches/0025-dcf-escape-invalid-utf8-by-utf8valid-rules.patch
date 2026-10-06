@@ -31,7 +31,7 @@ Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz dcf
 target, testcase 4718311766818816).  The slow path is in R-devel only
 (r90200 and later); R 4.6.1 is not affected.
 
-Upstream status: r-devel/r-svn PR (to be opened); no R Bugzilla report
+Upstream status: r-devel/r-svn PR #359; no R Bugzilla report
 yet.  The upstream patch also adds a regression test to
 tests/reg-tests-1e.R, left out here so this carry patch does not go
 stale with that file.  The dcf.c hunk is made against a tree with
