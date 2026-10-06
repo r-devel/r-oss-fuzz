@@ -1,0 +1,69 @@
+Cap the buffer memDecompress(type = "gzip") allocates up front from the
+gzip trailer when R is built with libdeflate, so the decompress target
+stops dying on a forged ISIZE.
+
+The libdeflate branch of do_memDecompress() (src/main/connections.c)
+reads the uncompressed size recorded in the gzip trailer and R_alloc()s
+it before decoding a byte.  The trailer is part of the input, so a 1 KB
+stream can claim 4 GB; libdeflate would reject the stream as bad data,
+but the allocation happens first:
+
+    ==248== ERROR: libFuzzer: out-of-memory (malloc(4026531936))
+        #8 Rf_allocVector3 /src/r-source/src/main/memory.c:2895:7
+        #10 R_alloc /src/r-source/src/main/memory.c:2333:6
+        #11 do_memDecompress /src/r-source/src/main/connections.c:7299:19
+
+DEFLATE expands by at most 1032:1, so cap the initial buffer at that
+multiple of the input; a truthful ISIZE is always within the cap and
+output of 4 GB or more (where ISIZE has wrapped) is still reached by
+the existing doubling on LIBDEFLATE_INSUFFICIENT_SPACE.  Also require
+the 18 bytes of a minimal gzip member before reading the magic and the
+trailer, so a shorter input is handed to libdeflate instead of read past
+its end.
+
+Found by OSS-Fuzz (testcase 5726025607348224).  The same input hit the
+zlib path's infinite loop before the fuzz image gained libdeflate; that
+fix is patch 0022 (r-svn PR #357, Bugzilla 19200).
+
+Upstream status: r-devel/r-svn PR #358 (no Bugzilla report yet); its
+regression test in tests/reg-tests-1e.R is left out here so this carry
+patch does not go stale with that file.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/connections.c b/src/main/connections.c
+index a4905eeecb..e4a6f2fd88 100644
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -7291,16 +7291,26 @@ do_memDecompress(SEXP call, SEXP op, SEXP args, SEXP env)
+         enum libdeflate_result res;
+ 	Bytef *buf, *p = (Bytef *)RAW(from);
+ 
+-	if (p[0] == 0x1f && p[1] == 0x8b) { // in-memory gzip file
+-	    while(1) {
+-		outlen = get_unaligned_le32(&p[inlen - 4]);
+-		if (outlen == 0) outlen = 1;
++	/* a gzip member is at least a 10-byte header plus the 8-byte
++	   trailer; anything shorter is left to libdeflate to reject */
++	if (inlen >= 18 && p[0] == 0x1f && p[1] == 0x8b) { // in-memory gzip file
++	    /* The trailer's ISIZE is the uncompressed length mod 2^32, but
++	       it is part of the input and cannot be trusted: a 1 KB
++	       stream can claim 4 GB and that is allocated before a byte
++	       is decoded.  DEFLATE expands by at most 1032:1, so a size
++	       beyond that bound is a lie (or a stream of 4 GB or more,
++	       which the doubling below still reaches). */
++	    size_t maxlen = 1032 * inlen + 64;
++	    outlen = get_unaligned_le32(&p[inlen - 4]);
++	    if (outlen == 0) outlen = 1;
++	    else if (outlen > maxlen) outlen = maxlen;
+ 
++	    while(1) {
+ 		buf = (Bytef *) R_alloc(outlen, sizeof(Bytef));
+ 		res = libdeflate_gzip_decompress(d, RAW(from), inlen,
+ 						 buf, outlen, &actual_out);
+ 		if(res == LIBDEFLATE_INSUFFICIENT_SPACE) {
+-		    // should not happen but recorded length might be wrong.
++		    // recorded length wrong, capped above, or output >= 4 GB
+ 		    if(outlen < ULONG_MAX/2) {
+ 			outlen *= 2; continue;
+ 		    } else break;
