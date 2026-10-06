@@ -1,0 +1,142 @@
+Fix read.dcf() re-encoding a whole field value for every continuation
+line once it contains a 4-byte sequence above U+10FFFF, which made the
+dcf target time out.
+
+mkCharUTF8sub() in src/main/dcf.c gates on utf8Valid() and repairs via
+iconv() with "<xx>" substitution.  glibc and libiconv both pass
+well-formed 4-byte sequences for code points above U+10FFFF (lead bytes
+F4 90.. to F7) through unchanged, while utf8Valid() rejects them
+(RFC 3629).  Such a value never satisfies the gate, so each further
+continuation line of that field re-encodes the whole accumulated value
+again.  A 40 KB record with one such line followed by ~6000
+continuation lines took 4.5 s on a release build and past the 25 s
+libFuzzer limit on the fuzzing bot:
+
+    ==252== ERROR: libFuzzer: timeout after 35 seconds
+       #19 R_FreeStringBuffer      src/main/memory.c:4988
+       #20 Rf_reEnc4               src/main/sysutils.c:2407
+       #21 Rf_reEnc3               src/main/sysutils.c:2394
+       #22 mkCharUTF8sub           src/main/dcf.c:51
+       #23 do_readDCF              src/main/dcf.c:261
+       ...
+       #42 LLVMFuzzerTestOneInput  harnesses/dcf.c:56
+
+Escape invalid bytes with utf8Valid()'s own rules instead (a small
+utf8ValidClen() helper next to utf8Valid() in src/main/util.c), so the
+result is valid by construction and later lines take the fast path.
+The "<xx>" escapes are the same ones iconv(sub = "byte") produces for
+everything it does reject.  With the change the input takes 0.28 s.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz dcf
+target, testcase 4718311766818816).  The slow path is in R-devel only
+(r90200 and later); R 4.6.1 is not affected.
+
+Upstream status: r-devel/r-svn PR (to be opened); no R Bugzilla report
+yet.  The upstream patch also adds a regression test to
+tests/reg-tests-1e.R, left out here so this carry patch does not go
+stale with that file.  The dcf.c hunk is made against a tree with
+patches 0015 and 0021 applied, which also change that file.  Delete
+this patch once the fix lands in R trunk (ossfuzz.sh will report it as
+already-applied in the meantime, which is harmless).
+
+diff --git a/src/include/Defn.h b/src/include/Defn.h
+index 6ef896f..1e33d74 100644
+--- a/src/include/Defn.h
++++ b/src/include/Defn.h
+@@ -2448,14 +2448,13 @@ SEXP Rf_installTrChar(SEXP);
+ 
+ const wchar_t *wtransChar(SEXP x); /* from sysutils.c */
+ const char *Rf_reEnc3(const char *x, const char *fromcode, const char *tocode, int subst);
+-const char *Rf_reEnc4(const char *x, size_t length, const char *fromcode,
+-		     const char *tocode, int subst);
+ 
+ #define mbs_init(x) memset(x, 0, sizeof(mbstate_t))
+ size_t Mbrtowc(wchar_t *wc, const char *s, size_t n, mbstate_t *ps);
+ Rboolean mbcsValid(const char *str);
+ char *mbcsTruncateToValid(char *s);
+ Rboolean utf8Valid(const char *str);
++int utf8ValidClen(const char *);
+ char *Rf_strchr(char *s, int c);
+ char *Rf_strrchr(char *s, int c);
+ const char *Rf_strchr_const(const char *s, int c);
+diff --git a/src/main/dcf.c b/src/main/dcf.c
+index 29b994f..dec3362 100644
+--- a/src/main/dcf.c
++++ b/src/main/dcf.c
+@@ -34,22 +34,45 @@ static void transferVector(SEXP s, SEXP t);
+ /* Build a CHARSXP marked as UTF-8 from the NUL-terminated string 's'.
+    DCF files are required to be UTF-8, so 's' is interpreted as UTF-8
+    regardless of its actual encoding; any invalid byte sequences are
+-   repaired by escaping them as "<xx>", exactly as
++   repaired by escaping them as "<xx>", as
+    iconv(from = "UTF-8", to = "UTF-8", sub = "byte") does (which the R
+    code paths in read.dcf()/write.dcf() also use).  The common case of
+-   already-valid input is handled without conversion. */
++   already-valid input is handled without conversion.
++
++   The escaping is done with utf8Valid()'s rules rather than by iconv():
++   glibc and libiconv pass 4-byte sequences above U+10FFFF through,
++   which utf8Valid() rejects, so an iconv() round trip could leave the
++   result invalid and do_readDCF() would then re-encode the whole field
++   value for every further continuation line. */
+ static SEXP mkCharUTF8sub(const char *s)
+ {
+     if (utf8Valid(s))
+ 	return mkCharCE(s, CE_UTF8);
+ 
+-    /* reEnc3() performs the iconv() repair via Riconv(); subst = 1 selects
+-       the "<xx>" hexadecimal substitution for invalid bytes.  It returns a
+-       string allocated with R_alloc() (and freed at the vmaxset() in
+-       do_readDCF()), or 's' itself if iconv is unavailable.  Either way
+-       mkCharCE() copies the bytes into the CHARSXP below. */
+-    const char *repaired = reEnc3(s, "UTF-8", "UTF-8", 1);
+-    return mkCharCE(repaired, CE_UTF8);
++    const void *vmax = vmaxget();
++    char *out = R_alloc(4 * strlen(s) + 1, sizeof(char)); /* all escaped */
++    char *q = out;
++    for (const char *p = s; *p; ) {
++	if ((unsigned char) *p < 0x80) {
++	    *q++ = *p++;
++	    continue;
++	}
++	int len = utf8ValidClen(p);
++	if (len > 0) {
++	    memcpy(q, p, len);
++	    q += len;
++	    p += len;
++	} else {
++	    snprintf(q, 5, "<%02x>", (unsigned char) *p);
++	    q += 4;
++	    p++;
++	}
++    }
++    *q = '\0';
++
++    SEXP ans = mkCharCE(out, CE_UTF8);
++    vmaxset(vmax);
++    return ans;
+ }
+ 
+ /* What do_readDCF() has to release however it exits: the error() calls
+diff --git a/src/main/util.c b/src/main/util.c
+index 885ac78..e6aaf42 100644
+--- a/src/main/util.c
++++ b/src/main/util.c
+@@ -1706,6 +1706,17 @@ Rboolean utf8Valid(const char *str)
+     return valid_utf8(str, strlen(str)) == 0;
+ }
+ 
++/* Number of bytes in the valid UTF-8 character starting at 's', judged
++   by the same rules as utf8Valid(), or 0 if 's' does not start one. */
++attribute_hidden int utf8ValidClen(const char *s)
++{
++    int len = utf8clen(*s);
++    for (int i = 1; i < len; i++)
++	if (!s[i])
++	    return 0;
++    return valid_utf8(s, len) == 0 ? len : 0;
++}
++
+ attribute_hidden SEXP do_validUTF8(SEXP call, SEXP op, SEXP args, SEXP rho)
+ {
+     checkArity(op, args);
