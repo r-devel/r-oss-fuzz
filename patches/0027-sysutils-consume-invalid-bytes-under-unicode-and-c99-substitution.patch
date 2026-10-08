@@ -24,7 +24,8 @@ or 11 (c99) bytes, more than the 4 this writes.
 
 Found by fuzzing R with libFuzzer + AddressSanitizer (as a timeout).
 
-Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-10-08.
+Upstream status: r-devel/r-svn PR #361 and R Bugzilla 19207
+(https://bugs.r-project.org/show_bug.cgi?id=19207), filed 2026-10-08.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
