@@ -33,7 +33,9 @@ Found by CIFuzz on r-oss-fuzz PR #37 (libFuzzer_r_load: load()'s R
 code gsub()s the file's magic bytes into its deprecation warning, so a
 non-UTF-8 magic takes this path).
 
-Upstream status: r-devel/r-svn PR #365; R Bugzilla report drafted (2026-10-08).
+Upstream status: carried here only, by decision (2026-10-08): regex-related
+fixes wait for the planned sync of the bundled TRE with upstream.  r-svn
+PR #365 was opened and closed for the same reason.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
