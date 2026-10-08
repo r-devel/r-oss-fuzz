@@ -1,0 +1,61 @@
+Fix an infinite loop in iconv() with sub = "Unicode" or sub = "c99" on
+input that is not valid UTF-8.
+
+    iconv("a\xc3(", "UTF-8", "ASCII", sub = "Unicode")
+
+never returns.  When the converter stops on an invalid or truncated
+sequence, the "Unicode" and "c99" substitution branches of do_iconv()
+decode the offending bytes with utf8toucs() to name the code point.
+If that decoding fails (clen <= 0, or fewer bytes left than it needs)
+nothing is written and, crucially, nothing is consumed; the code then
+jumps back to Riconv(), which fails at the very same byte, and so on
+forever.  The sub = "byte" branch always advances by at least one byte,
+which is why it does not loop.
+
+These two modes are the documented way to make untrusted text printable
+(?iconv recommends them over sub = "byte" for UTF-8 input), so a single
+stray byte in a file or web response hangs the session.  Reproduces in
+released R 4.6.1.
+
+When there is no code point to name, substitute the byte exactly as
+sub = "byte" does ("<c3>") and consume it, so the loop makes progress.
+The surrounding buffer checks already guarantee room for 13 (Unicode)
+or 11 (c99) bytes, more than the 4 this writes.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer (as a timeout).
+
+Upstream status: r-devel/r-svn PR #361 and R Bugzilla 19207
+(https://bugs.r-project.org/show_bug.cgi?id=19207), filed 2026-10-08.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/sysutils.c
++++ b/src/main/sysutils.c
+@@ -834,6 +834,15 @@
+ 			    size_t l = strlen(outbuf);
+ 			    outbuf += l; outb -= l;
+ 			}
++		    } else {
++			/* Not a UTF-8 sequence at all (or cut short):
++			   there is no code point to name, so substitute
++			   the byte as sub = "byte" would.  Something must
++			   be consumed, or the next Riconv() call fails at
++			   the same byte forever. */
++			snprintf(outbuf, 5, "<%02x>", (unsigned char)*inbuf);
++			outbuf += 4; outb -= 4;
++			inbuf++; inb--;
+ 		    }
+ 		    goto next_char;
+ 		} else if(fromUTF8 && streql(sub, "c99")) {
+@@ -862,6 +871,11 @@
+ 			    snprintf(outbuf, 11, "\\U%08x", (unsigned int) ucs);
+ 			    outbuf += 10; outb -= 10;
+ 			}
++		    } else {
++			/* As above: an invalid byte has no code point. */
++			snprintf(outbuf, 5, "<%02x>", (unsigned char)*inbuf);
++			outbuf += 4; outb -= 4;
++			inbuf++; inb--;
+ 		    }
+ 		    goto next_char;
+ 		} else {

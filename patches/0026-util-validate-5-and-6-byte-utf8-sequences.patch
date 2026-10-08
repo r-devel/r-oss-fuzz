@@ -1,0 +1,104 @@
+Fix out-of-bounds read in Rwcrtomb32 on a UTF-8-marked string whose
+bytes form a 5- or 6-byte sequence with an out-of-range lead byte.
+
+utf8toucs() decodes the long-withdrawn 5- and 6-byte UTF-8 forms "with
+no testing": it neither checks the continuation bytes nor masks the lead
+byte to the bits those forms actually carry, so a run of 0xFF bytes is
+accepted as a 6-byte sequence whose value overflows 31 bits.  Encoding
+that value back with Rwcrtomb32() walks off the end of utf8_table1 and
+indexes utf8_table2 one past its last element:
+
+    ==1==ERROR: AddressSanitizer: global-buffer-overflow
+    READ of size 4
+        #0 Rwcrtomb32      src/main/util.c:1551
+        #1 Rf_wcstoutf8    src/main/util.c:1580
+        #2 do_chartr       src/main/character.c:1630
+
+Reachable from R whenever a string carrying the UTF-8 mark holds such
+bytes -- the mark is not validated, so Encoding<-, readLines(encoding =
+"UTF-8") and friends all produce one from untrusted input:
+
+    x <- "J\xff\xff\xff\xff z"
+    Encoding(x) <- "UTF-8"
+    chartr("a", "b", x)
+
+Released R returns garbage silently; under ASAN it is the overflow above.
+
+Check the 5- and 6-byte forms the way the shorter ones already are:
+every continuation byte must be 10xxxxxx, the lead byte contributes only
+its low 2 (5-byte) or 1 (6-byte) bits, and 0xFE/0xFF are never lead
+bytes.  Invalid input is then rejected with the existing "invalid input
+in 'utf8towcs'" error instead of being decoded.  This also corrects the
+5-byte branch, which shifted the first two continuation bytes by the
+same amount (12) and so never decoded those sequences correctly.  As a
+backstop, Rwcrtomb32() now refuses a value above 0x7FFFFFFF rather than
+indexing past its tables.
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: r-devel/r-svn PR #360 and R Bugzilla 19206
+(https://bugs.r-project.org/show_bug.cgi?id=19206), filed 2026-10-08.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/util.c
++++ b/src/main/util.c
+@@ -1435,25 +1435,34 @@
+ 	} else return (size_t)-1;
+     }
+     if(sizeof(wchar_t) < 4) return (size_t)-2;
+-    /* So now handle 5.6 byte sequences with no testing */
++    /* 5- and 6-byte sequences (RFC 2279, withdrawn by RFC 3629): kept
++       for compatibility, but checked like the shorter forms so the
++       result fits in 31 bits.  0xFE and 0xFF are never lead bytes. */
+     if (byte < 0xFC) {
+ 	if(strlen(s) < 5) return (size_t)-2;
+-	*w = (wchar_t) (((byte & 0x0F) << 24)
+-			| (unsigned int) ((s[1] & 0x3F) << 12)
+-			| (unsigned int) ((s[2] & 0x3F) << 12)
+-			| (unsigned int) ((s[3] & 0x3F) << 6)
+-			| (s[4] & 0x3F));
+-	return 5;
+-    } else {
++	if (((s[1] & 0xC0) == 0x80) && ((s[2] & 0xC0) == 0x80)
++	    && ((s[3] & 0xC0) == 0x80) && ((s[4] & 0xC0) == 0x80)) {
++	    *w = (wchar_t) (((byte & 0x03) << 24)
++			    | (unsigned int) ((s[1] & 0x3F) << 18)
++			    | (unsigned int) ((s[2] & 0x3F) << 12)
++			    | (unsigned int) ((s[3] & 0x3F) << 6)
++			    | (s[4] & 0x3F));
++	    return 5;
++	} else return (size_t)-1;
++    } else if (byte < 0xFE) {
+ 	if(strlen(s) < 6) return (size_t)-2;
+-	*w = (wchar_t) (((byte & 0x0F) << 30)
+-			| (unsigned int) ((s[1] & 0x3F) << 24)
+-			| (unsigned int) ((s[2] & 0x3F) << 18)
+-			| (unsigned int) ((s[3] & 0x3F) << 12)
+-			| (unsigned int) ((s[4] & 0x3F) << 6)
+-			| (s[5] & 0x3F));
+-	return 6;
+-    }
++	if (((s[1] & 0xC0) == 0x80) && ((s[2] & 0xC0) == 0x80)
++	    && ((s[3] & 0xC0) == 0x80) && ((s[4] & 0xC0) == 0x80)
++	    && ((s[5] & 0xC0) == 0x80)) {
++	    *w = (wchar_t) (((byte & 0x01) << 30)
++			    | (unsigned int) ((s[1] & 0x3F) << 24)
++			    | (unsigned int) ((s[2] & 0x3F) << 18)
++			    | (unsigned int) ((s[3] & 0x3F) << 12)
++			    | (unsigned int) ((s[4] & 0x3F) << 6)
++			    | (s[5] & 0x3F));
++	    return 6;
++	} else return (size_t)-1;
++    } else return (size_t)-1;
+ }
+ 
+ /* despite its name this translates to UTF-16 if there are (invalid)
+@@ -1541,6 +1550,7 @@
+     if(cvalue == 0) return 0;
+     for (i = 0; i < sizeof(utf8_table1)/sizeof(int); i++)
+ 	if (cvalue <= utf8_table1[i]) break;
++    if (i >= sizeof(utf8_table1)/sizeof(int)) return 0; /* not encodable */
+     if (i >= n - 1) return 0;  /* need space for terminal null */
+     if (s) {
+ 	s += i;
