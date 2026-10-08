@@ -1,0 +1,21 @@
+# Byte-order marks and encoding-sensitive sequences for file(encoding=)
+bom_utf8="\xef\xbb\xbf"
+bom_utf16le="\xff\xfe"
+bom_utf16be="\xfe\xff"
+utf8_2byte="\xc3\xa9"
+utf8_3byte="\xe2\x82\xac"
+utf8_4byte="\xf0\x9f\x98\x80"
+utf8_truncated="\xe2\x82"
+utf8_overlong="\xc0\x80"
+latin1_high="\xe9"
+# Compressed-stream magics
+gzip="\x1f\x8b\x08"
+bzip2="BZh9"
+xz="\xfd7zXZ\x00"
+zstd="\x28\xb5\x2f\xfd"
+# Line structure
+crlf="\x0d\x0a"
+lf="\x0a"
+cr="\x0d"
+nul="\x00"
+blank_line="\x0a\x0a"
