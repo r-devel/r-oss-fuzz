@@ -294,14 +294,10 @@ mkdir -p "$SEED_STAGE/unserialize"
 # target is just deleting its name here.  rd waits on two R bugs its first
 # runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
 # (reached through \encoding{}) and parse_Rd() never returning on an
-# unterminated \Sexpr.  load waits for the same reason: its first runs
-# found three distinct memory-safety bugs in the pre-R-1.4 readers of
-# saveload.c (a NULL dereference, a file-controlled out-of-bounds write
-# and a use-after-free) plus unbounded malloc from a 4-byte length field,
-# none with a carried fix yet.  ClusterFuzzLite is not so constrained
-# (findings stay within this repository's CI), so .clusterfuzzlite/build.sh
-# clears the list and keeps fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd load}"
+# unterminated \Sexpr.  ClusterFuzzLite is not so constrained (findings stay
+# within this repository's CI), so .clusterfuzzlite/build.sh clears the list
+# and keeps fuzzing everything.
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
