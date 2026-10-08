@@ -24,7 +24,8 @@ Found by CIFuzz on r-oss-fuzz PR #35 (libFuzzer_r_connections,
 leak-0cc822214d5ebd6731347304f65b25991d258b3f: a corrupt gzip stream
 read through gzfile(path, "rt")).
 
-Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-10-08.
+Upstream status: r-devel/r-svn PR #363 and R Bugzilla 19208
+(https://bugs.r-project.org/show_bug.cgi?id=19208), filed 2026-10-08.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
