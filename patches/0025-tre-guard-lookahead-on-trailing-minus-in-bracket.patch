@@ -1,0 +1,57 @@
+Fix out-of-bounds read in tre_parse_bracket_items on a bracket
+expression whose last pattern byte is '-'.
+
+A bytes-mode pattern ending in a hyphen inside an unterminated bracket
+expression, such as the 3-byte pattern "[a-", makes the parser read one
+element past the end of the pattern buffer:
+
+    ==1==ERROR: AddressSanitizer: heap-buffer-overflow
+    READ of size 4
+        #0 tre_parse_bracket_items src/extra/tre/tre-parse.c:365
+        #1 tre_parse_bracket       src/extra/tre/tre-parse.c:453
+        #2 tre_parse               src/extra/tre/tre-parse.c:1388
+        #3 tre_compile             src/extra/tre/tre-compile.c:1920
+        #4 tre_regncompb           src/extra/tre/regcomp.c:118
+        #5 do_grepraw              src/main/grep.c:1739
+
+The range check for a hyphen peeks at the following element,
+"*(re + 1) != CHAR_RBRACKET", without first testing that one exists.
+Every other lookahead in the parser is guarded by a comparison against
+ctx->re_end; this one relies on the pattern buffer carrying a
+terminating nul instead.  tre_regncomp() supplies that nul (it
+allocates n + 1 elements and writes L'\0' at the end), but the
+bytes-mode entry point tre_regncompb() -- used by grepRaw() and by
+every useBytes = TRUE regex call -- allocates exactly n elements and
+no terminator, so the peek at the final hyphen reads past the
+allocation.
+
+Guard the lookahead like the others.  Treating "no following element"
+the same as "not a closing bracket" preserves the result the
+nul-terminated path already produces (REG_ERANGE for "[a-", REG_OK for
+"[a-]" and "[-a]").
+
+Reachable from R via grepRaw(), and via grep(), sub(), regexpr() and
+friends with useBytes = TRUE, whenever the pattern comes from an
+untrusted source:
+
+    grepRaw("[a-", charToRaw("xa-"), all = TRUE)
+
+Found by fuzzing R with libFuzzer + AddressSanitizer.
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-10-08.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/extra/tre/tre-parse.c
++++ b/src/extra/tre/tre-parse.c
+@@ -362,8 +362,8 @@
+ 	  else
+ 	    {
+ 	      DPRINT(("tre_parse_bracket:   char: '%.*" STRF "'\n", REST(re)));
+-	      if (*re == CHAR_MINUS && *(re + 1) != CHAR_RBRACKET
+-		  && ctx->re != re)
++	      if (*re == CHAR_MINUS && ctx->re != re
++		  && (re + 1 >= ctx->re_end || *(re + 1) != CHAR_RBRACKET))
+ 		/* Two ranges are not allowed to share and endpoint. */
+ 		status = REG_ERANGE;
+ 	      min = max = *re++;

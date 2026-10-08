@@ -1,0 +1,7 @@
+red
+green
+blue
+red
+red
+green
+NA

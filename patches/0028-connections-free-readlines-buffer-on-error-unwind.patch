@@ -1,0 +1,82 @@
+Fix a memory leak in readLines() when an error unwinds mid-read, so the
+connections target does not accumulate leaked line buffers.
+
+do_readLines() (src/main/connections.c) reads each line into a buffer it
+malloc()s up front (1000 bytes, doubled by realloc() as needed) and
+free()s only on its two normal exits.  Any error raised in between
+unwinds past both: a read error or encoding-conversion failure inside
+Rconn_fgetc() ("error reading from the connection", "invalid input
+found on input connection"), "too many items", or an allocation failure
+for the result vector.  A corrupt gzip file is enough:
+
+    ==47==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 1000 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 do_readLines src/main/connections.c:4472
+        #2 bcEval_loop  src/main/eval.c:8150
+
+Take the buffer from R_alloc() instead, growing it by allocating a
+larger block and copying, and release it with vmaxset() on the normal
+exits; memory from R_alloc() is reclaimed by the error unwind, so
+nothing is leaked whichever way the function leaves.
+
+Found by CIFuzz on r-oss-fuzz PR #35 (libFuzzer_r_connections,
+leak-0cc822214d5ebd6731347304f65b25991d258b3f: a corrupt gzip stream
+read through gzfile(path, "rt")).
+
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-10-08.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -4469,9 +4469,12 @@
+     else if(streql(encoding, "latin1")) oenc = CE_LATIN1;
+     else if(streql(encoding, "bytes")) oenc = CE_BYTES;
+ 
+-    buf = (char *) malloc(buf_size);
+-    if(!buf)
+-	error(_("cannot allocate buffer in readLines"));
++    /* R_alloc rather than malloc: an error raised while reading (a
++       conversion failure or read error in Rconn_fgetc, "too many
++       items", an allocation failure) unwinds past the frees below, and
++       memory from R_alloc is reclaimed by the unwind. */
++    const void *vmax = vmaxget();
++    buf = R_alloc(buf_size, sizeof(char));
+     nn = (n < 0) ? 1000 : n; /* initially allocate space for 1000 lines */
+     nnn = (n < 0) ? R_XLEN_T_MAX : n;
+     PROTECT(ans = allocVector(STRSXP, nn));
+@@ -4489,12 +4492,10 @@
+ 	nbuf = 0;
+ 	while((c = Rconn_fgetc(con)) != R_EOF) {
+ 	    if(nbuf == buf_size-1) {  /* need space for the terminator */
++		char *tmp = R_alloc(2 * buf_size, sizeof(char));
++		memcpy(tmp, buf, nbuf);
++		buf = tmp;
+ 		buf_size *= 2;
+-		char *tmp = (char *) realloc(buf, buf_size);
+-		if(!tmp) {
+-		    free(buf);
+-		    error(_("cannot allocate buffer in readLines"));
+-		} else buf = tmp;
+ 	    }
+ 	    if(skipNul && c == '\0') continue;
+ 	    if(c != '\n')
+@@ -4517,7 +4518,7 @@
+     }
+     if(!wasopen) {endcontext(&cntxt); con->close(con);}
+     UNPROTECT(1);
+-    free(buf);
++    vmaxset(vmax);
+     return ans;
+ no_more_lines:
+     if(!wasopen) {endcontext(&cntxt); con->close(con);}
+@@ -4534,7 +4535,7 @@
+ 			con->description);
+ 	}
+     }
+-    free(buf);
++    vmaxset(vmax);
+     if(nread < nnn && !ok)
+ 	error(_("too few lines read in readLines"));
+     PROTECT(ans2 = allocVector(STRSXP, nread));

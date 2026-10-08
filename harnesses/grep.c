@@ -1,9 +1,12 @@
 /*
- * libFuzzer harness for R's regex engine.
+ * libFuzzer harness for R's regex engines.
  *
- * Uses fuzzed input as a regex pattern passed to grep() -- exercising
- * both the TRE (default) and PCRE2 (perl=TRUE) regex backends, plus
- * sub() for substitution.
+ * Uses fuzzed input as a regex pattern against a fixed character vector,
+ * exercising both the TRE (default) and PCRE2 (perl=TRUE) backends
+ * through every entry point in grep.c: grep/grepl, sub/gsub (including
+ * backreference and case-conversion replacements), regexpr/gregexpr,
+ * regexec, and grepRaw.  The first input byte selects the call; the
+ * rest is the pattern.
  *
  * Adapted from r-afl's grep harness.
  */
@@ -14,11 +17,31 @@
 #include "common.h"
 
 #define FUZZ_MAX_INPUT (1024 * 64)
+#define N_CALLS 16
+
+/* Closures over (pattern, subjects).  The first three are the original
+ * harness's calls. */
+static const char *const sources[N_CALLS] = {
+    "function(p, x) grep(p, x)",
+    "function(p, x) grep(p, x, perl = TRUE)",
+    "function(p, x) sub(p, \"X\", x)",
+    "function(p, x) regexpr(p, x)",
+    "function(p, x) gregexpr(p, x)",
+    "function(p, x) regexec(p, x)",
+    "function(p, x) gregexpr(p, x, perl = TRUE)",
+    "function(p, x) regexpr(p, x, fixed = TRUE)",
+    "function(p, x) gsub(p, \"X\", x, perl = TRUE)",
+    "function(p, x) grepRaw(p, charToRaw(x[3L]), all = TRUE)",
+    "function(p, x) grepl(p, x, useBytes = TRUE)",
+    "function(p, x) regexec(p, x, perl = TRUE)",
+    "function(p, x) regexpr(p, x, perl = TRUE)",
+    "function(p, x) gsub(p, \"\\\\1\", x)",
+    "function(p, x) sub(p, \"X\", x, fixed = TRUE)",
+    "function(p, x) gsub(p, \"\\\\U\\\\1\", x, perl = TRUE)",
+};
 
 static SEXP x_pat;
-static SEXP call_grep_tre;
-static SEXP call_grep_pcre;
-static SEXP call_sub;
+static SEXP calls[N_CALLS];
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
@@ -36,65 +59,38 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     /* Reusable pattern container -- each iteration swaps the CHARSXP. */
     Rf_protect(x_pat = Rf_allocVector(STRSXP, 1));
 
-    SEXP replacement;
-    Rf_protect(replacement = Rf_mkString("X"));
-
-    SEXP perl_true;
-    Rf_protect(perl_true = Rf_ScalarLogical(TRUE));
-
-    SEXP sym_grep = Rf_install("grep");
-    SEXP sym_sub  = Rf_install("sub");
-
-    /* grep(pattern, x) -- TRE regex engine */
-    Rf_protect(call_grep_tre = Rf_lang3(sym_grep, x_pat, x));
-
-    /* grep(pattern, x, perl=TRUE) -- PCRE2 engine */
-    Rf_protect(call_grep_pcre = Rf_lang4(sym_grep, x_pat, x, perl_true));
-    SET_TAG(CDDDR(call_grep_pcre), Rf_install("perl"));
-
-    /* sub(pattern, "X", x) -- TRE substitution */
-    Rf_protect(call_sub = Rf_lang4(sym_sub, x_pat, replacement, x));
+    for (int i = 0; i < N_CALLS; i++) {
+        SEXP wrapper;
+        Rf_protect(wrapper = fuzz_make_wrapper(sources[i]));
+        Rf_protect(calls[i] = Rf_lang3(wrapper, x_pat, x));
+    }
 
     /* Warmup: prime regex engine state before fuzzing. */
-    {
-        int error = 0;
-        SET_STRING_ELT(x_pat, 0, Rf_mkChar("x"));
-        R_tryEval(call_grep_tre,  R_GlobalEnv, &error); error = 0;
-        R_tryEval(call_grep_pcre, R_GlobalEnv, &error); error = 0;
-        R_tryEval(call_sub,       R_GlobalEnv, &error);
-    }
+    SET_STRING_ELT(x_pat, 0, Rf_mkChar("(o)"));
+    for (int i = 0; i < N_CALLS; i++)
+        fuzz_eval_silent(calls[i], R_GlobalEnv);
 
     return 0;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    if (size == 0 || size > FUZZ_MAX_INPUT)
+    if (size < 2 || size > FUZZ_MAX_INPUT || memchr(data + 1, '\0', size - 1))
         return 0;
 
-    char buf[FUZZ_MAX_INPUT + 1];
-    memcpy(buf, data, size);
-    buf[size] = '\0';
+    char buf[FUZZ_MAX_INPUT];
+    memcpy(buf, data + 1, size - 1);
+    buf[size - 1] = '\0';
 
-    /* Same TRE bounded-repeat blowup as agrep; grep's TRE calls compile
-     * the same pattern.  PCRE2 loses a little repeat coverage too, but it
-     * rejects nested quantifiers anyway.  See common.h. */
+    /* Same TRE bounded-repeat blowup as agrep; every slot compiles the
+     * pattern with TRE or PCRE2.  PCRE2 loses a little repeat coverage
+     * too, but it rejects nested quantifiers anyway.  See common.h. */
     if (fuzz_repeat_product_excessive(buf))
         return 0;
 
     if (!fuzz_set_string(x_pat, buf))
         return 0;
 
-    fuzz_eval_data_t ed = { .env = R_GlobalEnv };
-
-    ed.call = call_grep_tre;
-    R_ToplevelExec(fuzz_do_eval, &ed);
-
-    ed.call = call_grep_pcre;
-    R_ToplevelExec(fuzz_do_eval, &ed);
-
-    ed.call = call_sub;
-    R_ToplevelExec(fuzz_do_eval, &ed);
-
+    fuzz_eval_silent(calls[data[0] % N_CALLS], R_GlobalEnv);
     return 0;
 }

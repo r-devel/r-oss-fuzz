@@ -1,8 +1,11 @@
 /*
  * libFuzzer harness for R's deserializer.
  *
- * Feeds raw bytes to unserialize() as a raw vector -- exercising R's
- * serialization format parser (src/main/serialize.c).
+ * Feeds raw bytes to the serialization format parser (src/main/serialize.c)
+ * either directly, as unserialize() on a raw vector, or through the
+ * connection-backed readers that readRDS() really uses: a rawConnection,
+ * and a rawConnection wrapped in gzcon() so the gzip framing layer in
+ * connections.c is parsed too.  The last input byte selects the route.
  *
  * The serialization format is used for .rds/.RData files, and users
  * routinely deserialize data from untrusted sources via readRDS().
@@ -42,19 +45,37 @@
 #include "common.h"
 
 #define FUZZ_MAX_INPUT (1024 * 64)
+#define N_CALLS 4
 
-static SEXP call_unser;
+/* Slot 0 is the raw-vector route the original harness used.  The others
+ * close their connection on exit so a failed read cannot leak one of
+ * R's 128 connection slots across iterations. */
+static const char *const sources[N_CALLS] = {
+    "function(x) unserialize(x)",
+    "function(x) { con <- rawConnection(x); on.exit(close(con)); "
+    "unserialize(con) }",
+    "function(x) { con <- rawConnection(x); on.exit(close(con)); "
+    "readRDS(con) }",
+    "function(x) { con <- gzcon(rawConnection(x)); on.exit(close(con)); "
+    "readRDS(con) }",
+};
+
+static SEXP calls[N_CALLS];
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
+    (void)argc;
+    (void)argv;
     fuzz_init_r();
 
-    /* Pre-build the call: unserialize(<placeholder>) */
-    Rf_protect(call_unser = Rf_lang2(Rf_install("unserialize"),
-                                     Rf_allocVector(RAWSXP, 1)));
+    for (int i = 0; i < N_CALLS; i++) {
+        SEXP wrapper;
+        Rf_protect(wrapper = fuzz_make_wrapper(sources[i]));
+        Rf_protect(calls[i] = Rf_lang2(wrapper, Rf_allocVector(RAWSXP, 1)));
+    }
 
     /* Warmup: serialize(NULL, NULL) to get a valid RDS blob, then
-     * round-trip it through unserialize to prime the code path. */
+     * round-trip it through every route to prime the code paths. */
     {
         int error = 0;
         SEXP ser_call;
@@ -63,9 +84,10 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         SEXP w_raw = R_tryEval(ser_call, R_GlobalEnv, &error);
         if (!error && w_raw != R_NilValue) {
             Rf_protect(w_raw);
-            SETCADR(call_unser, w_raw);
-            fuzz_eval_data_t ed = { .call = call_unser, .env = R_GlobalEnv };
-            R_ToplevelExec(fuzz_do_eval, &ed);
+            for (int i = 0; i < N_CALLS; i++) {
+                SETCADR(calls[i], w_raw);
+                fuzz_eval_silent(calls[i], R_GlobalEnv);
+            }
             Rf_unprotect(1);
         }
         Rf_unprotect(1); /* ser_call */
@@ -76,14 +98,16 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    if (size == 0 || size > FUZZ_MAX_INPUT)
+    if (size < 2 || size > FUZZ_MAX_INPUT)
         return 0;
 
-    if (!fuzz_set_raw_arg(call_unser, data, size))
+    /* The last byte picks the route and stays in the payload: the
+     * deserializer ignores trailing bytes, so every stored input keeps
+     * its full meaning on every route. */
+    int selected = data[size - 1] % N_CALLS;
+    if (!fuzz_set_raw_arg(calls[selected], data, size))
         return 0;
 
-    fuzz_eval_data_t ed = { .call = call_unser, .env = R_GlobalEnv };
-    R_ToplevelExec(fuzz_do_eval, &ed);
-
+    fuzz_eval_silent(calls[selected], R_GlobalEnv);
     return 0;
 }

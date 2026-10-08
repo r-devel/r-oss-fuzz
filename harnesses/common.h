@@ -5,7 +5,11 @@
  *   fuzz_suppress_warnings() - Suppress R warnings to avoid buffer overflow
  *   fuzz_init_r()            - Full R initialization sequence
  *   fuzz_set_string()        - Stage a string input under a toplevel context
+ *   fuzz_set_string_ce()     - Stage a string with an explicit encoding mark
  *   fuzz_set_raw_arg()       - Stage a raw-vector input likewise
+ *   fuzz_make_wrapper()      - Parse an R closure that implements a call slot
+ *   fuzz_scratch_file()      - Per-process temp file for path-only entry points
+ *   fuzz_write_scratch()     - Rewrite that file with the current input
  *   fuzz_repeat_product_excessive() - Guard against TRE repeat blowup
  *
  * Adapted from r-afl's fuzz.h for use with libFuzzer instead of AFL++.
@@ -16,6 +20,7 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -200,6 +205,55 @@ static Rboolean fuzz_set_string(SEXP vec, const char *str)
     return R_ToplevelExec(fuzz_do_set_string, &sd);
 }
 
+/*
+ * Parse and evaluate one R function literal, once, at initialization.
+ *
+ * Harnesses whose calls need named arguments, on.exit(close(con)) or a
+ * few R-level steps around the entry point express each slot as an R
+ * closure and call it with Rf_lang*; that keeps the C side free of
+ * argument plumbing.  The source is harness-authored (never fuzz
+ * input), so a parse or evaluation failure is a harness bug: abort.
+ */
+static SEXP fuzz_make_wrapper(const char *source)
+{
+    ParseStatus status;
+    SEXP text, parsed, wrapper;
+    Rf_protect(text = Rf_mkString(source));
+    Rf_protect(parsed = R_ParseVector(text, -1, &status, R_NilValue));
+    if (status != PARSE_OK || XLENGTH(parsed) != 1)
+        abort();
+
+    wrapper = Rf_eval(VECTOR_ELT(parsed, 0), R_BaseEnv);
+    Rf_unprotect(2);
+    return wrapper;
+}
+
+/*
+ * fuzz_set_string with an explicit encoding mark.
+ *
+ * R does not validate the mark (Encoding<- lets users set it on any
+ * bytes), so handing the same payload over as UTF-8 or latin1 reaches
+ * the multibyte branches and their handling of invalid sequences
+ * without touching the process locale.
+ */
+typedef struct {
+    SEXP vec;
+    const char *str;
+    cetype_t ce;
+} fuzz_ce_string_data_t;
+
+static void fuzz_do_set_string_ce(void *data)
+{
+    fuzz_ce_string_data_t *sd = (fuzz_ce_string_data_t *)data;
+    SET_STRING_ELT(sd->vec, 0, Rf_mkCharCE(sd->str, sd->ce));
+}
+
+static Rboolean fuzz_set_string_ce(SEXP vec, const char *str, cetype_t ce)
+{
+    fuzz_ce_string_data_t sd = { vec, str, ce };
+    return R_ToplevelExec(fuzz_do_set_string_ce, &sd);
+}
+
 typedef struct {
     SEXP call;
     const uint8_t *data;
@@ -222,6 +276,50 @@ static Rboolean fuzz_set_raw_arg(SEXP call, const uint8_t *data, size_t size)
 {
     fuzz_raw_data_t rd = { call, data, size };
     return R_ToplevelExec(fuzz_do_set_raw, &rd);
+}
+
+/*
+ * Stage the input in a scratch file.
+ *
+ * Some R entry points only take a path (load() of a pre-1.4 save file,
+ * unzip(), file(encoding=)), so those targets rewrite one per-process
+ * file each iteration instead of handing R a raw vector.  The file lives
+ * in the system temp directory, which OSS-Fuzz runners allow writes to,
+ * and is created once in LLVMFuzzerInitialize so fuzzing never pays a
+ * mkstemp per input.  Returns a malloc'd path, or NULL on failure.
+ */
+static char *fuzz_scratch_file(const char *name)
+{
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || *tmpdir == '\0')
+        tmpdir = "/tmp";
+
+    char *path = malloc(PATH_MAX);
+    if (path == NULL)
+        return NULL;
+    snprintf(path, PATH_MAX, "%s/fuzz-%s-XXXXXX", tmpdir, name);
+
+    int fd = mkstemp(path);
+    if (fd < 0) {
+        free(path);
+        return NULL;
+    }
+    close(fd);
+    return path;
+}
+
+/* Replace the scratch file's contents.  Returns FALSE on any I/O error so
+ * the iteration can be skipped rather than fuzzing a stale file. */
+static Rboolean fuzz_write_scratch(const char *path, const uint8_t *data,
+                                   size_t size)
+{
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL)
+        return FALSE;
+
+    size_t written = size > 0 ? fwrite(data, 1, size, fp) : 0;
+    int rc = fclose(fp);
+    return written == size && rc == 0;
 }
 
 /*

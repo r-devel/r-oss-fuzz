@@ -72,3 +72,21 @@
 # Unicode
 "\xc3\xa9"
 "\xe4\xb8\xad"
+
+# allowEscapes = TRUE sequences
+"\\x41"
+"\\101"
+"\\u00e9"
+"\\U0001f600"
+
+# Typed readers: integer / complex / raw / logical
+"-1.5e3i"
+"0xff"
+"ff"
+"0a"
+"false"
+"1e308"
+"1,5"
+
+# NA / comment / decimal-mark configurations
+"-"

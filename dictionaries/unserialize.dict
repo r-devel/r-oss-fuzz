@@ -125,3 +125,8 @@
 "POSIXct"
 "POSIXlt"
 "Date"
+
+# gzip framing seen by the gzcon() route
+"\x1f\x8b\x08\x00"
+"\x1f\x8b\x08\x08"
+"\x03\x00"

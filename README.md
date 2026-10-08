@@ -46,6 +46,11 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `character`    | character widths, substrings, quoting, names, and raw conversion |
+| `load` \*     | `load()` of pre-R-1.4 save files — the legacy ASCII/binary/XDR readers in `saveload.c` |
+| `zip`          | `unzip()` / `unz()` — the bundled minizip (`dounzip.c`)  |
+| `connections`  | `file(encoding=)`, `gzfile`/`bzfile`/`xzfile`/`zstdfile`, `gzcon`, `rawConnection` — the connection layer's readers and re-encoding (`connections.c`) |
+| `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
+| `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
 
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
 manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see
@@ -57,7 +62,11 @@ once the initial targets have settled, rather than at onboarding.
 `rd` is held back for a different reason: its first runs hit two R bugs that
 have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
 through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
-`\Sexpr`.
+`\Sexpr`. `load` is held back likewise: its first runs found three distinct
+memory-safety bugs in the pre-R-1.4 readers of `saveload.c` (a NULL
+dereference, a file-controlled out-of-bounds write, and a use-after-free)
+plus an unbounded `malloc` from a 4-byte length field, none with a carried
+fix yet.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
@@ -66,6 +75,11 @@ All targets embed R via `Rf_initEmbeddedR` and share the setup in
 so the sanitizers' own handlers stay in place and traps crash cleanly,
 suppress warnings, and wrap each call in `R_ToplevelExec` to catch R's
 longjmp-on-error).
+
+Targets whose R entry point only takes a path (`load`, `zip`, `connections`)
+stage each input in one per-process scratch file under the temp directory
+(`fuzz_scratch_file` / `fuzz_write_scratch` in `common.h`) rather than
+passing a raw vector.
 
 The harnesses also cap R's vector heap by defaulting `R_MAX_VSIZE=1Gb`
 (`4Gb` for `decompress`), so a crafted length field cannot allocate the

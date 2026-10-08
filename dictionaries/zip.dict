@@ -1,0 +1,35 @@
+# zip record signatures
+sig_local="PK\x03\x04"
+sig_central="PK\x01\x02"
+sig_eocd="PK\x05\x06"
+sig_zip64_eocd="PK\x06\x06"
+sig_zip64_locator="PK\x06\x07"
+sig_data_desc="PK\x07\x08"
+sig_spanned="PK\x30\x30"
+
+# version needed / made by
+ver_10="\x0a\x00"
+ver_20="\x14\x00"
+ver_45="\x2d\x00"
+
+# compression methods: stored, deflate, and ones minizip rejects
+method_stored="\x00\x00"
+method_deflate="\x08\x00"
+method_bzip2="\x0c\x00"
+method_lzma="\x0e\x00"
+method_zstd="\x5d\x00"
+
+# flags: encrypted, data descriptor, utf-8 names
+flag_encrypted="\x01\x00"
+flag_datadesc="\x08\x00"
+flag_utf8="\x00\x08"
+
+# zip64 extra field header and sizes sentinel
+extra_zip64="\x01\x00"
+size_ffff="\xff\xff"
+size_ffffffff="\xff\xff\xff\xff"
+
+# entry names
+name_dir="dir/"
+name_dotdot="../"
+name_txt="a.txt"
