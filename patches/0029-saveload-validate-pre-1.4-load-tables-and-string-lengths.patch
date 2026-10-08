@@ -1,0 +1,214 @@
+Fix four memory-safety bugs in the pre-R-1.4.0 load() readers of
+saveload.c, reached by load() on any file whose magic is not RD[ABX][2-9].
+
+The DataLoad() path (numeric magics 1971-1977) and the version-1 string
+readers trust every count and index in the file:
+
+1. DataLoad() sizes its forwarding tables from NSymbol + NSave read from
+   the file.  With both zero, R_alloc(0) returns NULL and the binary
+   search in OffsetToNode() dereferences OldOffset[0] (NULL read; a
+   21-byte file).  Negative counts, or a sum that overflows, size the
+   tables wrongly.
+2. DataLoad() stores node.OldOffset[j] with j taken straight from the
+   file and never compared with NTotal: a file-controlled out-of-bounds
+   write (SEGV at a wild address; a 76-byte file).
+3. InStringAscii(), InStringBinary() and InStringXdr() take the byte
+   count from the file unchecked.  An XDR count of 0xffffffff makes
+   realloc(buf, nbytes + 1) a realloc(buf, 0), which frees the static
+   buffer and returns NULL; the error() that follows leaves buf
+   dangling with buflen unchanged, and the next string read writes into
+   freed memory (heap-use-after-free).  Smaller counts simply ask
+   malloc() for up to 2 GB per string (R Bugzilla 19046 reports the
+   negative and INT_MAX cases of the same field).
+4. RestoreSEXP() copies a CHARSXP's bytes with strcpy() into a CHARSXP
+   that RemakeNextSEXP() sized from a separate length field, so a string
+   longer than its declared length overflows the object.
+
+The fix validates each of those at the point of use: table sizes must
+be non-negative and must not overflow; node indices must lie in
+[0, NTotal); OffsetToNode() uses a conventional bounded binary search
+that never reads an empty table; string counts must be non-negative,
+below INT_MAX, and no larger than what remains of the file (fstat on
+the stream, which also stops the gigabyte allocations); a CHARSXP's
+string must not exceed its declared length.  DataLoad() also now
+resolves the top-level node before releasing the tables it lives in,
+rather than after.
+
+    ==1==ERROR: AddressSanitizer: SEGV on unknown address 0x2000007ff2e15906
+        #0 DataLoad           src/main/saveload.c:698
+    ==1==ERROR: AddressSanitizer: heap-use-after-free
+        #0 InStringXdr        src/main/saveload.c:1691
+
+Found by the load target in r-devel/r-oss-fuzz (first run, 2026-10-08;
+artifacts kept locally).
+
+Upstream status: r-devel/r-svn PR #364; R Bugzilla bug 19046 (the string
+readers were reported there in April 2026 with a narrower patch; this one
+is being added to that report).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -34,6 +34,9 @@
+ #include <R_ext/RS.h>
+ #include <errno.h>
+ #include <ctype.h>		/* for isspace */
++#ifdef HAVE_SYS_STAT_H
++# include <sys/stat.h>		/* for fstat, bounding string lengths */
++#endif
+ 
+ /* From time to time changes in R, such as the addition of a new SXP,
+  * may require changes in the save file format.  Here are some
+@@ -458,15 +461,15 @@
+ 
+     l = 0;
+     r = node->NTotal - 1;
+-    do {
++    while (l <= r) {
+ 	m = (l + r) / 2;
++	if (offset == node->OldOffset[m])
++	    return VECTOR_ELT(node->NewAddress, m);
+ 	if (offset < node->OldOffset[m])
+ 	    r = m - 1;
+ 	else
+ 	    l = m + 1;
+     }
+-    while (offset != node->OldOffset[m] && l <= r);
+-    if (offset == node->OldOffset[m]) return VECTOR_ELT(node->NewAddress, m);
+ 
+     /* Not supposed to happen: */
+     warning(_("unresolved node during restore"));
+@@ -537,6 +540,8 @@
+ 	break;
+     case CHARSXP:
+ 	len = m->InInteger(fp, d);
++	if (len < 0)
++	    error(_("corrupt data file: negative string length"));
+ 	s = allocCharsxp(len); /* This is not longer correct */
+ 	R_AllocStringBuffer(len, &(d->buffer));
+ 	/* skip over the string */
+@@ -618,7 +623,14 @@
+ 	len = m->InInteger(fp, d);
+ 	R_AllocStringBuffer(len, &(d->buffer));
+ 	/* Better to use a fresh copy in the cache */
+-	strcpy(CHAR_RW(s), m->InString(fp, d));
++	{
++	    /* the CHARSXP was sized from len in RemakeNextSEXP, but the
++	       string carries its own length field and need not agree */
++	    const char *str = m->InString(fp, d);
++	    if (strlen(str) > (size_t) len)
++		error(_("corrupt data file: string longer than its declared length"));
++	    strcpy(CHAR_RW(s), str);
++	}
+ 	break;
+     case REALSXP:
+ 	len = m->InInteger(fp, d);
+@@ -675,6 +687,11 @@
+     node.NSymbol = m->InInteger(fp, d);
+     node.NSave = m->InInteger(fp, d);
+     node.NVSize = m->InInteger(fp, d);
++    /* the counts come straight from the file: a negative one, or a sum
++       that overflows, would size the tables below wrongly */
++    if (node.NSymbol < 0 || node.NSave < 0 || node.NVSize < 0 ||
++	node.NSymbol > INT_MAX - node.NSave)
++	error(_("corrupt data file: invalid table sizes"));
+     node.NTotal = node.NSymbol + node.NSave;
+ 
+     /* allocate the forwarding-address tables */
+@@ -695,6 +712,8 @@
+ 
+     for (i = 0 ; i < node.NSymbol ; i++) {
+ 	j = m->InInteger(fp, d);
++	if (j < 0 || j >= node.NTotal)
++	    error(_("corrupt data file: node index out of range"));
+ 	node.OldOffset[j] = m->InInteger(fp, d);
+ 	R_AllocStringBuffer(MAXELTSIZE - 1, &(d->buffer));
+ 	SET_VECTOR_ELT(node.NewAddress, j, install(m->InString(fp, d)));
+@@ -704,6 +723,8 @@
+ 
+     for (i = 0 ; i < node.NSave ; i++) {
+ 	j = m->InInteger(fp, d);
++	if (j < 0 || j >= node.NTotal)
++	    error(_("corrupt data file: node index out of range"));
+ 	node.OldOffset[j] = m->InInteger(fp, d);
+     }
+ 
+@@ -734,11 +755,6 @@
+ 	RestoreSEXP(VECTOR_ELT(node.NewAddress, m->InInteger(fp, d)), fp, m, &node, version, d);
+     }
+ 
+-    /* restore the heap */
+-
+-    vmaxset(vmaxsave);
+-    UNPROTECT(1);
+-
+     /* clean the string buffer */
+     R_FreeStringBufferL(&(d->buffer));
+ 
+@@ -748,7 +764,15 @@
+     i = m->InInteger(fp, d);
+     m->InTerm(fp, d);
+ 
+-    return OffsetToNode(i, &node);
++    /* resolve it before the tables it lives in are released */
++    SEXP ans = OffsetToNode(i, &node);
++
++    /* restore the heap */
++
++    vmaxset(vmaxsave);
++    UNPROTECT(1);
++
++    return ans;
+ }
+ 
+ 
+@@ -1384,6 +1408,24 @@
+ {
+     if (x == NA_INTEGER) fprintf(fp, "NA");
+     else fprintf(fp, "%d", x);
++}
++
++/* The pre-1.4 string readers take the byte count straight from the
++   file.  Reject a negative count, one too large to add 1 to, and one
++   larger than what is left of the file: the last check is what stops a
++   4-byte length field from asking malloc() for gigabytes. */
++static void CheckStringLength(FILE *fp, long nbytes, const char *format)
++{
++    if (nbytes < 0 || nbytes >= INT_MAX)
++	error(_("invalid string length %ld in %s data file"), nbytes, format);
++#ifdef HAVE_SYS_STAT_H
++    struct stat sb;
++    long pos = ftell(fp);
++    if (pos >= 0 && fstat(fileno(fp), &sb) == 0 && S_ISREG(sb.st_mode) &&
++	(sb.st_size < (off_t) pos || nbytes > (long) (sb.st_size - (off_t) pos)))
++	error(_("string length %ld exceeds the remaining %s data file"),
++	      nbytes, format);
++#endif
+ }
+ 
+ static int InIntegerAscii(FILE *fp, SaveLoadData *unused)
+@@ -1441,6 +1483,7 @@
+     int nbytes, res;
+     res = fscanf(fp, "%d", &nbytes);
+     if(res != 1) error(_("read error"));
++    CheckStringLength(fp, nbytes, "ascii");
+     /* FIXME : Ultimately we need to replace */
+     /* this with a real string allocation. */
+     /* All buffers must die! */
+@@ -1584,6 +1627,7 @@
+     static char *buf = NULL;
+     static int buflen = 0;
+     int nbytes = InIntegerBinary(fp, unused);
++    CheckStringLength(fp, nbytes, "binary");
+     if (nbytes >= buflen) {
+ 	char *newbuf;
+ 	/* Protect against broken realloc */
+@@ -1685,6 +1729,7 @@
+     static char *buf = NULL;
+     static int buflen = 0;
+     unsigned int nbytes = InIntegerXdr(fp, d);
++    CheckStringLength(fp, (long) nbytes, "xdr");
+     if (nbytes >= buflen) {
+ 	char *newbuf;
+ 	/* Protect against broken realloc */
