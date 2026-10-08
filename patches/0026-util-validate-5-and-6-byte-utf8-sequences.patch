@@ -36,7 +36,8 @@ indexing past its tables.
 
 Found by fuzzing R with libFuzzer + AddressSanitizer.
 
-Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-10-08.
+Upstream status: r-devel/r-svn PR #360 and R Bugzilla 19206
+(https://bugs.r-project.org/show_bug.cgi?id=19206), filed 2026-10-08.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
