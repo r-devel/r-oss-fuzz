@@ -1,0 +1,31 @@
+Free installTrChar()'s translation buffer before rejecting an over-long
+name, so the unserialize target stops leaking it.
+
+installTrChar() (src/main/sysutils.c) translates the name into an
+R_StringBuffer and passes it to install(), which raises "variable names
+are limited to 10000 bytes" for an over-long result; that error unwinds
+past the R_FreeStringBuffer() that follows.  Check the length first and
+free the buffer before raising the same error.
+
+Found by OSS-Fuzz: testcase 5066589054238720 (libFuzzer_r_unserialize,
+Direct-leak; a symbol with an over-long translated name in the stream).
+
+Upstream status: r-devel/r-svn PR #370, filed 2026-10-10 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/sysutils.c
++++ b/src/main/sysutils.c
+@@ -1891,6 +1891,11 @@
+     // symbols with escapes, with a warning.
+     translateToNative(CHAR(x), &cbuff, t, 2);
+ 
++    /* install() raises this itself, but then the buffer would leak. */
++    if (strlen(cbuff.data) > MAXIDSIZE) {
++	R_FreeStringBuffer(&cbuff);
++	error(_("variable names are limited to %d bytes"), MAXIDSIZE);
++    }
+     SEXP Sans = install(cbuff.data);
+     R_FreeStringBuffer(&cbuff);
+     return Sans;
