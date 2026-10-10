@@ -38,7 +38,7 @@ static SEXP input_string, digits, width, nsmall, flag, flags;
 /* Every slot has the signature (s, d, w, ns, fl).  num(s) is inlined as
  * a strsplit so the slots stay independent of each other; 500 numbers is
  * plenty for the width scans in formatReal. */
-#define NUM "n <- as.numeric(strsplit(s, '[ ,;\\t\\n]+')[[1]]); n <- n[seq_len(min(500L, length(n)))];"
+#define NUM "n <- as.numeric(strsplit(s, '[ ,;\\t\\n]+', perl = TRUE)[[1]]); n <- n[seq_len(min(500L, length(n)))];"
 
 static const char *const sources[N_CALLS] = {
     /* 0 */
