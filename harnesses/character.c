@@ -130,9 +130,14 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
     int k = N_FIXED_CALLS;
 
-    /* strsplit: TRE, PCRE, fixed and byte-wise matching, on native and
-     * UTF-8-marked input.  Only the empty fixed split ran before. */
-    Rf_protect(calls[k] = Rf_lang3(strsplit, input_string, aux_string));
+    /* strsplit: PCRE, fixed and byte-wise matching, on native and
+     * UTF-8-marked input.  Only the empty fixed split ran before.  The
+     * default engine, TRE, is left alone on purpose (see README.md), so
+     * every regex slot passes perl = TRUE. */
+    Rf_protect(calls[k] = tagged(tagged(Rf_lang5(strsplit, input_string,
+                                                 aux_string, true_value,
+                                                 true_value),
+                                        3, "perl"), 4, "useBytes"));
     needs[k++] = NEED_X | NEED_AUX | NEED_REGEX;
     Rf_protect(calls[k] = tagged(Rf_lang4(strsplit, input_string, aux_string,
                                           true_value), 3, "perl"));
@@ -140,10 +145,15 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     Rf_protect(calls[k] = tagged(Rf_lang4(strsplit, input_string, aux_string,
                                           true_value), 3, "fixed"));
     needs[k++] = NEED_X | NEED_AUX;
-    Rf_protect(calls[k] = tagged(Rf_lang4(strsplit, input_string, aux_string,
-                                          true_value), 3, "useBytes"));
-    needs[k++] = NEED_X | NEED_AUX | NEED_REGEX;
-    Rf_protect(calls[k] = Rf_lang3(strsplit, input_utf8, aux_utf8));
+    Rf_protect(calls[k] = tagged(tagged(Rf_lang5(strsplit, input_string,
+                                                 aux_string, true_value,
+                                                 true_value),
+                                        3, "fixed"), 4, "useBytes"));
+    needs[k++] = NEED_X | NEED_AUX;
+    Rf_protect(calls[k] = tagged(tagged(Rf_lang5(strsplit, input_utf8,
+                                                 aux_utf8, true_value,
+                                                 true_value),
+                                        3, "perl"), 4, "useBytes"));
     needs[k++] = NEED_XU | NEED_AUXU | NEED_REGEX;
     Rf_protect(calls[k] = tagged(Rf_lang4(strsplit, input_utf8, aux_utf8,
                                           true_value), 3, "perl"));

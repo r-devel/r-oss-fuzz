@@ -34,7 +34,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 |----------------|--------------------------------------------------------|
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
 | `unserialize`  | `unserialize()` / `readRDS` — the deserializer (security-critical) |
-| `grep` \*      | TRE and PCRE2 regex engines, plus `sub()`              |
+| `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `coerce`       | string→type conversion (`as.numeric`, `as.complex`, `as.logical`, `type.convert`) |
 | `datetime`     | `strptime` / `as.Date` / `as.POSIXct` / `as.POSIXlt` (`Rstrptime.h`, `datetime.c`) |
 | `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
@@ -59,6 +59,15 @@ tracker with a 90-day disclosure clock, and the regex targets mostly surface
 bugs in the bundled TRE engine — whose upstream is dormant, so every fix must
 be hand-patched into R. That triage load is worth opting into deliberately
 once the initial targets have settled, rather than at onboarding.
+
+For the same reason no harness drives TRE at all: every regex call in the
+harnesses passes `perl = TRUE` (or `fixed = TRUE` where there is no `perl`
+argument, as in `grepRaw()`), so the PCRE2 engine is what gets fuzzed. TRE's
+known problems — bounded-repeat expansion at compile time, exponential
+backtracking once a back-reference is present, and internal assertions that
+`longjmp` out of `tre_compile()` and leak everything it had allocated — are
+not findings this project pursues. `agrep` is TRE-only, which is why it stays
+deferred.
 `rd` is held back for a different reason: its first runs hit two R bugs that
 have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
 through `\encoding{}`) and `parse_Rd()` never returning on an unterminated

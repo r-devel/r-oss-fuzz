@@ -24,7 +24,10 @@
 #define FUZZ_MAX_INPUT (1024 * 64)
 #define N_CALLS 4
 
+/* Both paths stay reachable from here for the life of the process, so
+ * LeakSanitizer does not report them at exit. */
 static char *scratch_path;
+static char *scratch_dir;
 static SEXP calls[N_CALLS];
 
 /* Extraction needs a directory of its own.  junkpaths = TRUE keeps
@@ -56,8 +59,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     fuzz_init_r();
 
     scratch_path = fuzz_scratch_file("zip");
-    char *exdir = make_scratch_dir();
-    if (scratch_path == NULL || exdir == NULL)
+    scratch_dir = make_scratch_dir();
+    if (scratch_path == NULL || scratch_dir == NULL)
         abort();
 
     /* [0] listing only: central directory walk (ziplist).
@@ -87,7 +90,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     };
     SEXP path, exdir_string;
     Rf_protect(path = Rf_mkString(scratch_path));
-    Rf_protect(exdir_string = Rf_mkString(exdir));
+    Rf_protect(exdir_string = Rf_mkString(scratch_dir));
     for (int i = 0; i < N_CALLS; i++) {
         SEXP wrapper;
         Rf_protect(wrapper = fuzz_make_wrapper(sources[i]));

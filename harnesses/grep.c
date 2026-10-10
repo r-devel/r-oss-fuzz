@@ -2,11 +2,17 @@
  * libFuzzer harness for R's regex engines.
  *
  * Uses fuzzed input as a regex pattern against a fixed character vector,
- * exercising both the TRE (default) and PCRE2 (perl=TRUE) backends
- * through every entry point in grep.c: grep/grepl, sub/gsub (including
- * backreference and case-conversion replacements), regexpr/gregexpr,
- * regexec, and grepRaw.  The first input byte selects the call; the
- * rest is the pattern.
+ * exercising the PCRE2 (perl = TRUE) backend through every entry point
+ * in grep.c: grep/grepl, sub/gsub (including backreference and
+ * case-conversion replacements), regexpr/gregexpr and regexec, plus
+ * grepRaw with a fixed pattern.  The first input byte selects the call;
+ * the rest is the pattern.
+ *
+ * R's default engine, TRE, is deliberately not driven: its upstream is
+ * dormant and it has known compile-time blowups, exponential
+ * backtracking and internal assertions that longjmp out of
+ * tre_compile(), none of which this project pursues (see README.md).
+ * grepRaw() has no perl argument, so its slot uses fixed = TRUE.
  *
  * Adapted from r-afl's grep harness.
  */
@@ -22,20 +28,20 @@
 /* Closures over (pattern, subjects).  The first three are the original
  * harness's calls. */
 static const char *const sources[N_CALLS] = {
-    "function(p, x) grep(p, x)",
+    "function(p, x) grepl(p, x, perl = TRUE)",
     "function(p, x) grep(p, x, perl = TRUE)",
-    "function(p, x) sub(p, \"X\", x)",
-    "function(p, x) regexpr(p, x)",
-    "function(p, x) gregexpr(p, x)",
-    "function(p, x) regexec(p, x)",
+    "function(p, x) sub(p, \"X\", x, perl = TRUE)",
+    "function(p, x) regexpr(p, x, perl = TRUE, useBytes = TRUE)",
+    "function(p, x) gregexpr(p, x, perl = TRUE, ignore.case = TRUE)",
+    "function(p, x) regexec(p, x, perl = TRUE, ignore.case = TRUE)",
     "function(p, x) gregexpr(p, x, perl = TRUE)",
     "function(p, x) regexpr(p, x, fixed = TRUE)",
     "function(p, x) gsub(p, \"X\", x, perl = TRUE)",
-    "function(p, x) grepRaw(p, charToRaw(x[3L]), all = TRUE)",
-    "function(p, x) grepl(p, x, useBytes = TRUE)",
+    "function(p, x) grepRaw(p, charToRaw(x[3L]), all = TRUE, fixed = TRUE)",
+    "function(p, x) grepl(p, x, perl = TRUE, useBytes = TRUE)",
     "function(p, x) regexec(p, x, perl = TRUE)",
     "function(p, x) regexpr(p, x, perl = TRUE)",
-    "function(p, x) gsub(p, \"\\\\1\", x)",
+    "function(p, x) gsub(p, \"\\\\1\", x, perl = TRUE)",
     "function(p, x) sub(p, \"X\", x, fixed = TRUE)",
     "function(p, x) gsub(p, \"\\\\U\\\\1\", x, perl = TRUE)",
 };
@@ -82,9 +88,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     memcpy(buf, data + 1, size - 1);
     buf[size - 1] = '\0';
 
-    /* Same TRE bounded-repeat blowup as agrep; every slot compiles the
-     * pattern with TRE or PCRE2.  PCRE2 loses a little repeat coverage
-     * too, but it rejects nested quantifiers anyway.  See common.h. */
+    /* The repeat guard was written for TRE's bounded-repeat blowup;
+     * PCRE2 rejects nested quantifiers anyway, so keeping it costs
+     * little repeat coverage.  See common.h. */
     if (fuzz_repeat_product_excessive(buf))
         return 0;
 
