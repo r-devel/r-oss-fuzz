@@ -1,0 +1,33 @@
+Return bytes from text connections as unsigned, so a 0xff byte is data
+rather than R_EOF where char is signed; the scan target stopped timing
+out on inputs containing 0xff.
+
+text_fgetc() (src/main/connections.c) returned (int) of a signed char,
+so 0xff became -1 == R_EOF and every reader stopped at the first 0xff:
+readLines(textConnection("a\xffb")) gave character(0) and scan() saw
+end-of-file inside a quoted string, then again on every subsequent read
+(one "EOF within quoted string" warning per remaining field).
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R),
+not carried here.
+
+Found by OSS-Fuzz: testcase 6065703271333888 (libFuzzer_r_scan,
+Timeout; 56 KB input, 348 warnings).
+
+Upstream status: r-devel/r-svn PR #374, filed 2026-10-10 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -3593,7 +3593,8 @@
+ 	return c;
+     }
+     if(this->cur >= this->nchars) return R_EOF;
+-    else return (int) (this->data[this->cur++]);
++    /* as unsigned, or a 0xff byte reads as R_EOF where char is signed */
++    else return (unsigned char) this->data[this->cur++];
+ }
+ 
+ static double text_seek(Rconnection con, double where, int origin, int rw)

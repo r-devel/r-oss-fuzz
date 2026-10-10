@@ -1,0 +1,59 @@
+Stop calling BZ2_bzRead() on a bzfile connection once bzlib has
+reported an error on it, so the connections target stops crashing
+inside BZ2_decompress().
+
+bzfile_read() (src/main/connections.c) kept reading after an earlier
+BZ2_bzRead() returned BZ_DATA_ERROR.  bzlib does not recover a stream
+after a failed read, and reading on is undefined: BZ2_decompress()
+resumes from the partially decoded state and overruns its stack arrays
+(ASan bzip2 1.0.8: stack-buffer-overflow at decompress.c:315 on the
+second BZ2_bzRead() after a data error).  Remember the failure in the
+connection and report end-of-file from then on.
+
+Found by OSS-Fuzz: testcases 6548427090231296 (UNKNOWN READ) and
+5947283280297984 (Abrt), afl_asan_r, both in BZ2_decompress <-
+BZ2_bzDecompress <- BZ2_bzRead.
+
+Upstream status: r-devel/r-svn PR #371, filed 2026-10-10 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -1973,6 +1973,7 @@
+     FILE *fp;
+     BZFILE *bfp;
+     int compress;
++    bool failed; /* BZ2_bzRead() reported an error: see bzfile_read() */
+ } *Rbzfileconn;
+ 
+ static Rboolean bzfile_open(Rconnection con)
+@@ -2023,6 +2024,7 @@
+     }
+     bz->fp = fp;
+     bz->bfp = bfp;
++    bz->failed = false;
+     con->isopen = TRUE;
+     con->text = strchr(con->mode, 'b') ? FALSE : TRUE;
+     set_buffer(con);
+@@ -2056,6 +2058,11 @@
+ 	error(_("too large a block specified"));
+ 
+     nleft = (int)(size * nitems);
++    /* bzlib does not recover a stream once BZ2_bzRead() has failed on it,
++       and reading on is undefined: BZ2_decompress() resumes from the
++       partially decoded state and overruns its stack arrays on a corrupt
++       stream.  Report end-of-file instead. */
++    if (bz->failed) return 0;
+     /* we try to fill the buffer, because fgetc can interact with the stream boundaries
+        resulting in truncated text streams while binary streams work fine */
+     while (nleft > 0) {
+@@ -2093,6 +2100,7 @@
+ 		   "unused" bytes, and another read is attempted. */
+ 		warning(_("file '%s' appears not to be compressed by bzip2"),
+ 		    R_ExpandFileName(con->description));
++	    bz->failed = true;
+ 	    /* bzlib docs say in this case n is invalid - but historically
+ 	       we still used n in that case, so I keep it for now */
+ 	    nread += n;

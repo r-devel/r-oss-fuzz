@@ -1,0 +1,33 @@
+Check C stack usage in ReadItem_Recursive(), so a deeply nested
+serialized stream raises an R error instead of overflowing the stack.
+
+ReadItem_Recursive() (src/main/serialize.c) recurses once per level of
+nesting in the stream; a stream nesting pairlist or list items tens of
+thousands deep (50 KB is enough) segfaults.  R_CheckStack() on entry
+raises the usual "C stack usage is too close to the limit" error.
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R),
+not carried here.
+
+Found by OSS-Fuzz: testcase 6214305381679104 (afl_asan_r,
+Stack-overflow in ReadItem_Recursive).
+
+Upstream status: r-devel/r-svn PR #373, filed 2026-10-10 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/serialize.c
++++ b/src/main/serialize.c
+@@ -1894,6 +1894,11 @@
+ 
+     R_assert(TYPEOF(ref_table) == LISTSXP && TYPEOF(CAR(ref_table)) == VECSXP);
+ 
++    /* Each level of nesting in the stream recurses here, so a stream
++       nesting lists tens of thousands deep would otherwise overflow the
++       C stack before anything else notices. */
++    R_CheckStack();
++
+     UnpackFlags(flags, &type, &levs, &objf, &hasattr, &hastag);
+ 
+     switch(type) {
