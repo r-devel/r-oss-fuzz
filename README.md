@@ -46,7 +46,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `character`    | character widths, substrings, quoting, names, and raw conversion |
-| `load` \*     | `load()` of pre-R-1.4 save files — the legacy ASCII/binary/XDR readers in `saveload.c` |
+| `load`         | `load()` of pre-R-1.4 save files — the legacy ASCII/binary/XDR readers in `saveload.c` |
 | `zip`          | `unzip()` / `unz()` — the bundled minizip (`dounzip.c`)  |
 | `connections`  | `file(encoding=)`, `gzfile`/`bzfile`/`xzfile`/`zstdfile`, `gzcon`, `rawConnection` — the connection layer's readers and re-encoding (`connections.c`) |
 | `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
@@ -62,11 +62,7 @@ once the initial targets have settled, rather than at onboarding.
 `rd` is held back for a different reason: its first runs hit two R bugs that
 have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
 through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
-`\Sexpr`. `load` is held back likewise: its first runs found three distinct
-memory-safety bugs in the pre-R-1.4 readers of `saveload.c` (a NULL
-dereference, a file-controlled out-of-bounds write, and a use-after-free)
-plus an unbounded `malloc` from a 4-byte length field, none with a carried
-fix yet.
+`\Sexpr`.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
