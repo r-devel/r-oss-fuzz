@@ -1,0 +1,62 @@
+Step over an empty match in strsplit(perl = TRUE) by one byte unless the
+input is UTF-8, so the character target stops overflowing the token
+buffer on bytes-encoded input.
+
+do_strsplit() (src/main/grep.c) advances past an empty PCRE match by
+utf8clen() of the next byte (r84516, PR#18546), even for useBytes = TRUE
+or native input in a single-byte locale, where the string was never
+validated as UTF-8.  A byte such as 0xff makes utf8clen() claim 6 bytes:
+the counting loop runs past the terminator, and the fill loop's
+strncpy() writes those bytes into a token buffer of strlen(buf) + 1:
+
+    ==5395==ERROR: AddressSanitizer: heap-buffer-overflow
+    WRITE of size 4 at 0x792d892f22d2 thread T0
+        #0 ___interceptor_strncpy
+        #1 do_strsplit src/main/grep.c:908
+        #2 bcEval_loop src/main/eval.c:8150
+    0x792d892f22d2 is located 0 bytes after 2-byte region
+
+Advance by one byte unless use_UTF8 (whose input has passed utf8Valid()),
+as gsub()'s PCRE path already does.
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R),
+not carried here.
+
+Found by OSS-Fuzz: testcase 5881106650693632 (afl_r_character,
+strsplit("\xff", "|", perl = TRUE, useBytes = TRUE)).
+
+Upstream status: r-devel/r-svn PR #376, filed 2026-10-12 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/grep.c
++++ b/src/main/grep.c
+@@ -869,11 +869,14 @@
+ 					  (int) strlen(bufp),
+ 					  0, 0, ovector, ovecsize)) >= 0) {
+ #endif
+-			/* Empty matches get the next char, so move by one. */
++			/* Empty matches get the next char, so move by one.
++			   Only use_UTF8 input has been validated as UTF-8;
++			   utf8clen() on an arbitrary byte claims up to 6 and
++			   would run past the terminator. */
+ 			if (ovector[1] > 0)
+ 			    bufp += ovector[1];
+ 			else if (*bufp)
+-			    bufp += utf8clen(*bufp);
++			    bufp += use_UTF8 ? utf8clen(*bufp) : 1;
+ 			ntok++;
+ 			if (*bufp == '\0')
+ 			    break;
+@@ -903,8 +906,8 @@
+ 			pt[ovector[0]] = '\0';
+ 			bufp += ovector[1];
+ 		    } else {
+-			/* Match was empty. */
+-			int clen = utf8clen(*bufp);
++			/* Match was empty: copy one character (see above). */
++			int clen = use_UTF8 ? utf8clen(*bufp) : 1;
+ 			strncpy(pt, bufp, clen);
+ 			pt[clen] = '\0';
+ 			bufp += clen;
