@@ -25,8 +25,8 @@ not carried here.
 Found by OSS-Fuzz: testcase 5881106650693632 (afl_r_character,
 strsplit("\xff", "|", perl = TRUE, useBytes = TRUE)).
 
-Upstream status: r-devel/r-svn PR #376, filed 2026-10-12 (no Bugzilla
-report yet).
+Upstream status: r-devel/r-svn PR #376, filed 2026-10-12; R Bugzilla bug
+19212 (attachment 3909), filed 2026-10-13.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
