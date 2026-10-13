@@ -1,0 +1,45 @@
+Strip the UTF-8 BOM in scan() with the length of the string being
+moved, so the scan target stops reading past its field buffer.
+
+fillBuffer() (src/main/scan.c) removes a leading BOM with
+
+    memmove(buffer->data, buffer->data+3, strlen(buffer->data) + 1);
+
+copying from offset 3 but with the length of the whole string, so
+every strip reads 3 bytes past the NUL.  The buffer grows only when the
+write index reaches nbuf - 3, so a first field of exactly nbuf - 3 bytes
+(8189 for the initial 8192-byte buffer) leaves the terminator in the
+last slot and the over-read runs off the heap allocation:
+
+    ==1373==ERROR: AddressSanitizer: heap-buffer-overflow
+    READ of size 8190 at 0x79fe7d1a8900 thread T0
+        #0 __asan_memmove
+        #1 fillBuffer src/main/scan.c:475
+        #2 scanVector src/main/scan.c:618
+        #3 do_scan src/main/scan.c:1014
+    0x79fe7d1a8900 is located 0 bytes after 8192-byte region
+
+Use strlen(buffer->data+3) + 1.  Dates from the 2012 commit adding BOM
+support (R 3.0.0).
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R),
+not carried here.
+
+Found by OSS-Fuzz: testcase 5435960603770880 (libFuzzer_r_scan,
+scan(text = paste0("﻿", strrep("a", 8186)), what = "")).
+
+Upstream status: r-devel/r-svn PR #377, filed 2026-10-13.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/scan.c
++++ b/src/main/scan.c
+@@ -465,7 +465,7 @@
+     /* Remove UTF-8 BOM */
+     if(d->atStart && utf8locale &&
+        !strncmp(buffer->data, "\xef\xbb\xbf", 3))
+-	memmove(buffer->data, buffer->data+3, strlen(buffer->data) + 1);
++	memmove(buffer->data, buffer->data+3, strlen(buffer->data+3) + 1);
+     d->atStart = false;
+     *bch = filled;
+     return buffer->data;
