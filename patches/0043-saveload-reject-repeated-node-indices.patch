@@ -1,0 +1,45 @@
+Reject repeated node indices in DataLoad()'s first pass (pre-1.0 load()).
+
+DataLoad() (src/main/saveload.c), the reader load() uses for the
+numeric-magic save formats (1971-1977), restores objects in two passes.
+The first, RemakeNextSEXP(), allocates each record's object and stores
+it at the node index read from the file, without checking that the slot
+is still free.  When two records claim one index, the second replaces
+the first, and the second pass then restores the first record into the
+object allocated for the second: a record declaring 200000 integers is
+written into a zero-length vector, a file-controlled heap overflow.
+
+    ==254==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000001
+        #0 RestoreSEXP        src/main/saveload.c:659
+        #1 DataLoad           src/main/saveload.c:765
+
+(INTEGER() of a zero-length vector is (void *) 1.)  Reject an index
+that is out of range or already in use, including one taken by a
+symbol.
+
+Independent of patch 0029, which validates the forwarding tables of the
+same reader; this one applies on top of it with an offset.  The upstream
+PR also adds a regression test (tests/reg-tests-1e.R), not carried here.
+Found by the load target with patch 0029 applied: oss-fuzz testcases
+4545953420607488 and 5653432246272000 (2026-10-15).
+
+Upstream status: r-devel/r-svn PR #382, filed 2026-10-16.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -509,6 +509,13 @@
+     SEXP s = R_NilValue;	/* -Wall */
+ 
+     idx = m->InInteger(fp, d);
++    if (idx >= (unsigned int) node->NTotal)
++	error(_("corrupt data file: node index out of range"));
++    /* the second pass restores each record into the node at its index:
++       a repeated index would have it write one record's contents into
++       an object allocated, with a different length, from another */
++    if (VECTOR_ELT(node->NewAddress, idx) != R_NilValue)
++	error(_("corrupt data file: duplicate node index"));
+     type = FixupType(m->InInteger(fp, d), version);
+ 
+     /* skip over OBJECT, LEVELS, and ATTRIB */
