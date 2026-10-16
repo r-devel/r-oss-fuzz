@@ -1,0 +1,33 @@
+Reject invalid day-of-year values before indexing month_days.
+
+When strptime() parses "%j" without a year, glibc_fix() fills in the
+current year and walks month_days to derive the month and day. In a
+non-leap year, day 366 advances the month index to 12 and then reads
+month_days[12], beyond its 12 elements. Reject out-of-range yday values
+before the walk.
+
+A smaller reproducer is:
+    Rscript --vanilla -e 'strptime("366", "%j", tz="UTC")'
+
+The upstream PR also adds a regression test (tests/reg-tests-1a.R), not
+carried here.
+
+Found by OSS-Fuzz: testcase 4687865079201792 (libFuzzer_r_datetime,
+Global-buffer-overflow READ 4).
+
+Upstream status: r-devel/r-svn PR #384, filed 2026-10-16.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/datetime.c
++++ b/src/main/datetime.c
+@@ -927,6 +927,10 @@ static void glibc_fix(stm *tm, bool *invalid)
+     if(tm->tm_yday != NA_INTEGER) {
+ 	// since we have yday, let that take precedence over mon/mday
+ 	int yday = tm->tm_yday, mon = 0;
++	if (yday < 0 || yday >= days_in_year(1900 + tm->tm_year)) {
++	    *invalid = true;
++	    return;
++	}
+ 	while(yday >= (tmp = days_in_month(mon, tm->tm_year))) {
+ 	    yday -= tmp;
+ 	    mon++;
