@@ -1,0 +1,41 @@
+Protect the weak reference finalizer before duplicating the value, so
+R_MakeWeakRefC() cannot lose its finalizer to the collector.
+
+NewWeakRef() (src/main/memory.c) protects key, val, fin in that order,
+and the val step allocates:
+
+    PROTECT(key);
+    PROTECT(val = MAYBE_REFERENCED(val) ? duplicate(val) : val);
+    PROTECT(fin);
+
+R_MakeWeakRefC() passes a freshly allocated RAWSXP as fin, so when val
+is a referenced object the duplicate() can collect it; the weak
+reference then stores a recycled node as its finalizer and
+R_RunWeakRefFinalizer() later calls a stale pointer or tries to eval()
+whatever reused the node ("attempt to apply non-function").
+
+Protect fin before val.  In-tree callers all pass val = R_NilValue, so
+only packages calling R_MakeWeakRefC() with a value are exposed; carried
+here so the fuzz builds' R matches the fix under review.
+
+Found by static analysis (argument rooting inference over src/), not by
+a fuzz target.
+
+Upstream status: r-devel/r-svn PR #379, filed 2026-10-15.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/memory.c
++++ b/src/main/memory.c
+@@ -1399,8 +1399,10 @@ static SEXP NewWeakRef(SEXP key, SEXP val, SEXP fin, Rboolean onexit)
+     }
+ 
+     PROTECT(key);
+-    PROTECT(val = MAYBE_REFERENCED(val) ? duplicate(val) : val);
++    /* fin before val: R_MakeWeakRefC() passes a fresh finalizer object,
++       and duplicate(val) below can collect it */
+     PROTECT(fin);
++    PROTECT(val = MAYBE_REFERENCED(val) ? duplicate(val) : val);
+     w = allocVector(VECSXP, WEAKREF_SIZE);
+     SET_TYPEOF(w, WEAKREFSXP);
+     if (key != R_NilValue) {
