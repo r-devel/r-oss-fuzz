@@ -1,0 +1,97 @@
+Close the zip handle when unzip() raises an R error while extracting,
+so the zip target does not accumulate leaked handles and file
+descriptors.
+
+zipunzip() (src/main/dounzip.c) opens the archive with unzOpen64() and
+closes it only on its normal return.  extract_one() raises an R error
+when an output file cannot be opened ("cannot open file '...': File
+name too long" for an entry name over the file system's component
+limit, a read-only exdir, ...), which unwinds past that unzClose() and
+leaks the unz64_s handle together with its open FILE: every failed
+call costs the process a file descriptor.
+
+    ==254==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 248 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 unzOpenInternal src/main/dounzip.c:1216
+        #2 unzOpen64       src/main/dounzip.c:1235
+        #3 zipunzip        src/main/dounzip.c:253
+        #4 Runzip          src/main/dounzip.c:410
+
+Register the close with a CTXT_CCODE context so the unwind runs
+unzClose(), as connections.c does for connections it opens.  unz_open()
+has the same shape around its "cannot locate file" warning, which is an
+error under options(warn = 2); it now closes the handle before warning.
+
+Found by OSS-Fuzz (libFuzzer_r_zip, testcase 6726887658029056: an
+archive with a 304-byte entry name extracted with junkpaths = TRUE).
+Reproduced locally with the zip harness and on R 4.6.1, where the
+descriptor count grows by one per failed call; both are fixed by this
+patch.
+
+Upstream status: r-devel/r-svn PR #387 and R Bugzilla 19233
+(https://bugs.r-project.org/show_bug.cgi?id=19233), filed 2026-10-20.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/dounzip.c b/src/main/dounzip.c
+index 8da78e5d16..367ebb08e4 100644
+--- a/src/main/dounzip.c
++++ b/src/main/dounzip.c
+@@ -25,6 +25,7 @@
+ 
+ #define HAVE_BZIP2
+ 
++#define R_USE_SIGNALS 1
+ #include <Defn.h>
+ #include <Fileio.h> /* for R_fopen */
+ #include "unzip.h"
+@@ -242,6 +243,11 @@ extract_one(unzFile uf, const char *const dest, const char * const filename,
+ }
+ 
+ 
++static void unz_cleanup(void *data)
++{
++    unzClose((unzFile) data);
++}
++
+ static int
+ zipunzip(const char *zipname, const char *dest, int nfiles, const char **files,
+ 	 SEXP *pnames, int *nnames, int overwrite, int junk, int setTime)
+@@ -249,9 +255,17 @@ zipunzip(const char *zipname, const char *dest, int nfiles, const char **files,
+     int   i, err = UNZ_OK;
+     unzFile uf;
+     SEXP names = *pnames;
++    RCNTXT cntxt;
+ 
+     uf = unzOpen64(zipname);
+     if (!uf) return 1;
++    /* extract_one() raises an R error when an output file cannot be
++       opened, which would unwind past the unzClose() below and leak the
++       handle and its open FILE: close it from the context instead. */
++    begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &unz_cleanup;
++    cntxt.cenddata = uf;
+     if (nfiles == 0) { /* all files */
+ 	unz_global_info64 gi;
+ 	unzGetGlobalInfo64(uf, &gi);
+@@ -287,6 +301,7 @@ zipunzip(const char *zipname, const char *dest, int nfiles, const char **files,
+ 	}
+     }
+     *pnames = names;
++    endcontext(&cntxt);
+     unzClose(uf);
+     UNPROTECT(1); /* names */
+     return err;
+@@ -476,8 +491,9 @@ static Rboolean unz_open(Rconnection con)
+ 	return FALSE;
+     }
+     if (unzLocateFile(uf, p+1, 1) != UNZ_OK) {
+-	warning(_("cannot locate file '%s' in zip file '%s'"), p+1, path);
++	/* close first: the warning is an error under options(warn = 2) */
+ 	unzClose(uf);
++	warning(_("cannot locate file '%s' in zip file '%s'"), p+1, path);
+ 	return FALSE;
+     }
+     unzOpenCurrentFile(uf);
