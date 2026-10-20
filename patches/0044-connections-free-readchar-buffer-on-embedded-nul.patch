@@ -1,0 +1,59 @@
+Fix a memory leak in readChar() on a raw vector or binary connection
+when the requested bytes contain a nul, so the io target does not
+accumulate leaked read buffers.
+
+rawFixedString() (src/main/connections.c) backs readChar() with
+useBytes = TRUE, or in a non-UTF-8 locale.  It copies the requested
+bytes into an R_chk_calloc() buffer and hands them to mkCharLenCE(),
+which signals "embedded nul in string" when they contain a nul.  That
+error unwinds past the R_Free(), leaking the buffer on every call:
+
+    readChar(as.raw(0x00), 1L, useBytes = TRUE)
+
+    ==1691==ERROR: LeakSanitizer: detected memory leaks
+    Direct leak of 2 byte(s) in 1 object(s) allocated from:
+        #0 calloc
+        #1 R_chk_calloc    src/main/memory.c:3550
+        #2 rawFixedString  src/main/connections.c:5276
+        #3 do_readchar     src/main/connections.c:5347
+        #4 bcEval_loop     src/main/eval.c:8150
+
+Take the buffer from R_alloc() instead, under the vmaxget()/vmaxset()
+bracket the function already sets up for its UTF-8 branch (which uses
+R_alloc() for the same reason); memory from R_alloc() is reclaimed by
+the error unwind, so nothing is leaked whichever way the function
+leaves.
+
+Found by OSS-Fuzz (libFuzzer_r_io, testcase 4610937584418816: a
+single 0x00 byte read with readChar(x, c(1L, 5L, 16L, 64L),
+useBytes = TRUE)).  Reproduced locally with the io harness; the leak
+is gone with this patch.
+
+Upstream status: r-devel/r-svn PR #332, filed 2026-09-06 (from a
+static scan for resources released only on the normal return path);
+not yet on R Bugzilla.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/connections.c b/src/main/connections.c
+index 1e60538474..a3333aa3a3 100644
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -5259,13 +5259,14 @@ rawFixedString(Rbyte *bytes, int len, int nbytes, int *np, int useBytes)
+ 	*p = '\0';
+ 	res = mkCharLenCE(buf, clen, CE_NATIVE);
+     } else {
+-	/* no terminator */
+-	buf = R_chk_calloc(len + 1, 1);
++	/* no terminator; R_alloc, not R_chk_calloc: mkCharLenCE signals on an
++	   embedded nul (see the note above), which would leak the buffer.
++	   vmax is already bracketed above. */
++	buf = R_alloc((R_SIZE_T)len + 1, sizeof(char));
+ 	if (len)
+ 	    memcpy(buf, bytes + (*np), len);
+ 	*np += len;
+ 	res = mkCharLenCE(buf, len, CE_NATIVE);
+-	R_Free(buf);
+     }
+     vmaxset(vmax);
+     return res;
