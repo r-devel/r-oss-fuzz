@@ -1,0 +1,62 @@
+Free the PCRE character tables when a perl = TRUE pattern fails to
+compile, so the character and grep targets stop reporting
+pcre2_maketables() as a leak for every invalid pattern.
+
+R_pcre2_prepare() and R_pcre_prepare() (src/main/grep.c) build the
+locale character tables into a caller-owned variable before compiling
+the pattern; strsplit(), grep(), gsub(), regexpr() and regexec() free
+them only after their loop over the input.  When compilation fails the
+helpers free the compile context and signal "invalid regular
+expression", and that error unwinds past the callers' cleanup:
+
+    Direct leak of 1088 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 pcre2_maketables_8
+        #2 R_pcre2_prepare  src/main/grep.c:429
+        #3 do_strsplit      src/main/grep.c:815
+
+The tables are only built in non-UTF-8 mode (useBytes = TRUE, or a
+non-UTF-8 locale with unmarked input), which is why the UTF-8 slots of
+the harnesses never hit it.  The helpers now free the tables before
+signalling.
+
+Found by OSS-Fuzz: testcase 6104737142079488 (libFuzzer_r_character,
+Direct-leak, pcre2_maketables_8 <- do_strsplit; the three-byte input
+"s\\\n" is strsplit("", "\\", perl = TRUE, useBytes = TRUE)).  The
+reported R-source regression range r90656:r90659 is an artifact of the
+harness change in PR #41, which added the perl = TRUE strsplit slots;
+the leak dates from the 2019 PCRE2 port.
+
+Upstream status: r-devel/r-svn PR #388 and R Bugzilla 19234
+(https://bugs.r-project.org/show_bug.cgi?id=19234), filed 2026-10-20.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/grep.c b/src/main/grep.c
+index 52644c0954..40cecd31ec 100644
+--- a/src/main/grep.c
++++ b/src/main/grep.c
+@@ -439,6 +439,12 @@ R_pcre2_prepare(const char *pattern, SEXP subject, bool use_UTF8,
+ 	char buf[256];
+ 	pcre2_get_error_message(errcode, (PCRE2_UCHAR *)buf, sizeof(buf));
+ 	pcre2_compile_context_free(ccontext);
++	/* The tables belong to the caller, whose cleanup the error unwind
++	   skips. */
++	if (*tables) {
++	    free((void *)*tables);
++	    *tables = NULL;
++	}
+ 	warning(_("PCRE pattern compilation error\n\t'%s'\n\tat '%s'\n"), buf,
+ 	        to_native(pattern + erroffset, use_UTF8));
+ 	error(_("invalid regular expression '%s'"),
+@@ -510,6 +516,10 @@ R_pcre_prepare(const char *pattern, SEXP subject, bool use_UTF8,
+ 	*tables = pcre_maketables();
+     *re = pcre_compile(pattern, options, &errorptr, &erroffset, *tables);
+     if (!*re) {
++	/* The tables belong to the caller, whose cleanup the error unwind
++	   skips. */
++	pcre_free((void *)*tables);
++	*tables = NULL;
+ 	if (errorptr)
+ 	    warning(_("PCRE pattern compilation error\n\t'%s'\n\tat '%s'\n"),
+ 	            errorptr, to_native(pattern + erroffset, use_UTF8));
