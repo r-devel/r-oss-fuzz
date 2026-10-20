@@ -1,0 +1,40 @@
+Reject chartr() output that cannot be represented in the native locale.
+
+When a UTF-8 translation spec maps an ASCII input character to a code
+point unavailable in the native locale, wcstombs() returns (size_t)-1.
+do_chartr() cast this to -1, passed it to CallocCharBuf(), then called
+markKnown() on the resulting unterminated allocation.  mkCharCE() reads
+past the heap buffer while computing its length.  Keep the size_t result
+and reject conversion failure before allocating.
+
+A smaller reproducer is LC_ALL=C Rscript -e
+    'chartr("a", intToUtf8(256L), "a")'
+
+The upstream PR also adds a regression test (tests/reg-tests-1a.R), not
+carried here.
+
+Found by OSS-Fuzz: testcase 5327307326423040 (afl_r_character,
+Heap-buffer-overflow READ 3).
+
+Upstream status: r-devel/r-svn PR #383, filed 2026-10-16.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/character.c
++++ b/src/main/character.c
+@@ -1630,9 +1630,13 @@ attribute_hidden SEXP do_chartr(SEXP call, SEXP op, SEXP args, SEXP env)
+ 		    wcstoutf8(cbuf, wc, nb);
+ 		    SET_STRING_ELT(y, i, mkCharCE(cbuf, CE_UTF8));
+ 		} else {
+-		    nb = (int) wcstombs(NULL, wc, 0);
+-		    cbuf = CallocCharBuf(nb);
+-		    wcstombs(cbuf, wc, nb + 1);
++		    size_t nbytes = wcstombs(NULL, wc, 0);
++		    if (nbytes == (size_t)-1)
++			error(_("translated string is not representable in the current locale"));
++		    if (nbytes > INT_MAX)
++			error(_("R character strings are limited to 2^31-1 bytes"));
++		    cbuf = CallocCharBuf(nbytes);
++		    wcstombs(cbuf, wc, nbytes + 1);
+ 		    SET_STRING_ELT(y, i, markKnown(cbuf, el));
+ 		}
+ 		R_Free(cbuf);
