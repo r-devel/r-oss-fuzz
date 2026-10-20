@@ -29,8 +29,8 @@ Reproduced locally with the zip harness and on R 4.6.1, where the
 descriptor count grows by one per failed call; both are fixed by this
 patch.
 
-Upstream status: r-devel/r-svn PR #387, filed 2026-10-20; not yet on R
-Bugzilla.
+Upstream status: r-devel/r-svn PR #387 and R Bugzilla 19233
+(https://bugs.r-project.org/show_bug.cgi?id=19233), filed 2026-10-20.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
