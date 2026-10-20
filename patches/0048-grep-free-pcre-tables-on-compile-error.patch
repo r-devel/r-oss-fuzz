@@ -27,8 +27,8 @@ reported R-source regression range r90656:r90659 is an artifact of the
 harness change in PR #41, which added the perl = TRUE strsplit slots;
 the leak dates from the 2019 PCRE2 port.
 
-Upstream status: r-devel/r-svn PR #388, filed 2026-10-20 (no Bugzilla
-report yet).
+Upstream status: r-devel/r-svn PR #388 and R Bugzilla 19234
+(https://bugs.r-project.org/show_bug.cgi?id=19234), filed 2026-10-20.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
