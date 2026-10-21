@@ -1,0 +1,59 @@
+Bound the pre-1.4 load() table sizes by the size of the file.
+
+NewDataLoad() reads the symbol and environment counts from the file and
+allocates both tables, plus one ENVSXP per environment, before reading
+anything else. A 48-byte RDX1 file declaring 2^26 environments made it
+allocate a 512 MB VECSXP and 67 million environments. Every symbol and
+environment is followed by at least one item, and an item occupies at
+least a byte in every format, so reject counts larger than what is left
+of the file (fstat/ftell, regular files only).
+
+This patch is generated on top of 0029, which already adds the
+<sys/stat.h> include; the upstream PR carries that include itself.
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
+carried here.
+
+Found by OSS-Fuzz: testcase 5194049456504832 (libFuzzer_r_load,
+Out-of-memory in NewDataLoad).
+
+Upstream status: r-devel/r-svn PR #397, filed 2026-10-21.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -1355,6 +1355,26 @@
+     cinfo->methods->InTerm(fp, cinfo->data);
+ }
+ 
++/* The table sizes come straight from the file.  Every symbol and every
++   environment is followed by at least one item, and an item occupies at
++   least one byte in each format, so the counts cannot exceed what is
++   left of the file.  That is what stops a 4-byte count from allocating
++   gigabytes before the first item is read. */
++static void CheckTableSizes(FILE *fp, int sym_count, int env_count)
++{
++    if (sym_count < 0 || env_count < 0)
++	error(_("corrupt data file: negative table size"));
++#ifdef HAVE_SYS_STAT_H
++    struct stat sb;
++    long pos = ftell(fp);
++    if (pos >= 0 && fstat(fileno(fp), &sb) == 0 && S_ISREG(sb.st_mode)) {
++	double remaining = (double) sb.st_size - (double) pos;
++	if ((double) sym_count + (double) env_count > remaining)
++	    error(_("corrupt data file: table sizes exceed the file size"));
++    }
++#endif
++}
++
+ static SEXP NewDataLoad (FILE *fp, InputRoutines *m, SaveLoadData *d)
+ {
+     int sym_count, env_count, count;
+@@ -1374,6 +1394,7 @@
+     /* Read the table sizes */
+     sym_count = m->InInteger(fp, d);
+     env_count = m->InInteger(fp, d);
++    CheckTableSizes(fp, sym_count, env_count);
+ 
+     /* Allocate the symbol and environment tables */
+     PROTECT(sym_table = allocVector(VECSXP, sym_count));

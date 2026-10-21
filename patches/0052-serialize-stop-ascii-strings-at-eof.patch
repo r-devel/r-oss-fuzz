@@ -1,0 +1,45 @@
+Stop reading an ascii-format serialized string at end of input.
+
+InString() reads each character of an ascii-format string with
+GetChar(), which for a FILE stream is fgetc() and for a text connection
+is Rconn_fgetc(). Both return EOF without an error, so a declared string
+length larger than the rest of the input filled the remaining bytes with
+0xff and carried on. With a 2 GB declared length the invalid-UTF-8
+warning path then re-encoded 2 GB of 0xff bytes one iconv() call per
+byte. Error out at EOF instead, as the binary and xdr readers already do.
+
+A standalone reproducer is:
+    x <- strrep("a", 100)
+    s <- rawToChar(serialize(x, NULL, ascii = TRUE))
+    tc <- textConnection(substr(s, 1, nchar(s) - 50))
+    unserialize(tc)   # returned "aaa...\n\xff\xff..." rather than an error
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
+carried here.
+
+Found by OSS-Fuzz: testcase 5785070217265152 (libFuzzer_r_load, Timeout
+in reEnc4 / invalid_utf8_warning / ReadChar).
+
+Upstream status: r-devel/r-svn PR #396, filed 2026-10-21.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/serialize.c
++++ b/src/main/serialize.c
+@@ -514,8 +514,15 @@
+ 		;
+ 	    UngetChar(&iss, c);
+ 	    for (i = 0; i < length; i++) {
+-		if ((c =  GetChar(&iss)) == '\\') {
+-		    switch(c = GetChar(&iss)) {
++		/* fgetc() and text connections return EOF without an
++		   error: stop here rather than fill the rest of the
++		   string with EOF bytes */
++		if ((c = GetChar(&iss)) == EOF)
++		    error(_("read error"));
++		if (c == '\\') {
++		    if ((c = GetChar(&iss)) == EOF)
++			error(_("read error"));
++		    switch(c) {
+ 		    case 'n' : buf[i] = '\n'; break;
+ 		    case 't' : buf[i] = '\t'; break;
+ 		    case 'v' : buf[i] = '\v'; break;
