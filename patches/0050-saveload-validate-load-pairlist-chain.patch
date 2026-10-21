@@ -1,0 +1,51 @@
+Validate the pairlist chain before load() restores it into an environment.
+
+RestoreToEnv() (src/main/saveload.c) receives whatever R_Unserialize()
+or the pre-1.4 readers produced and only checks that the head is a
+pairlist node (isList()).  It then walks CDR() to the end, taking
+TAG() and CAR() of every node as a symbol and its value.  A
+hand-crafted .RData file can splice any object into the chain: the
+fuzzer put an external pointer there, whose CAR slot is its (NULL)
+address, so defineVar() bound a NULL SEXP and the pre-2.4.0 S4 check
+dereferenced it.
+
+    ==6788==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
+        #0 Rf_isObject               src/main/memory.c:4794
+        #1 R_seemsOldStyleS4Object   src/main/objects.c:1801
+        #2 RestoreToEnv              src/main/saveload.c:2224
+        #3 R_LoadSavedData           src/main/saveload.c:2236
+
+Other object types in the CDR position fare no better: vectors are read
+as pairlist nodes through their length fields (a NULL dereference), and
+a fresh symbol loops forever, since its value slot is R_UnboundValue,
+whose own value slot is itself.  Reject a chain that holds anything but
+LISTSXP nodes with symbol tags, with the existing "not in pair list
+form" error.
+Both load() entry points (loadFromConn2 for RD?2/RD?3 files and the
+.Internal(load()) fallback) go through RestoreToEnv().
+
+Upstream status: r-devel/r-svn PR #393 and Bugzilla 19238 (attachment
+3936), filed 2026-10-21.  The PR also
+adds a regression test (tests/reg-tests-1e.R), not carried here.
+Found by the load target: oss-fuzz testcase 4654451810697216
+(2026-10-19).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -2132,7 +2132,13 @@ static SEXP RestoreToEnv(SEXP ans, SEXP aenv)
+ 
+     PROTECT(ans);
+     a = ans;
+-    while (a != R_NilValue) {a = CDR(a); cnt++;}
++    while (a != R_NilValue) {
++	/* a hand-crafted file can splice any object into the chain */
++	if (TYPEOF(a) != LISTSXP || TYPEOF(TAG(a)) != SYMSXP)
++	    error(_("loaded data is not in pair list form"));
++	a = CDR(a);
++	cnt++;
++    }
+     PROTECT(names = allocVector(STRSXP, cnt));
+     cnt = 0;
+     a = ans;
