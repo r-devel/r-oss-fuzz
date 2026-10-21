@@ -24,7 +24,8 @@ form" error.
 Both load() entry points (loadFromConn2 for RD?2/RD?3 files and the
 .Internal(load()) fallback) go through RestoreToEnv().
 
-Upstream status: r-devel/r-svn PR #393, filed 2026-10-21.  The PR also
+Upstream status: r-devel/r-svn PR #393 and Bugzilla 19238 (attachment
+3936), filed 2026-10-21.  The PR also
 adds a regression test (tests/reg-tests-1e.R), not carried here.
 Found by the load target: oss-fuzz testcase 4654451810697216
 (2026-10-19).
