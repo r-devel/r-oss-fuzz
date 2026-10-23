@@ -46,7 +46,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
 | `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
 | `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
-| `eval` \*      | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`); see [`docs/eval.md`](./docs/eval.md) |
+| `eval`         | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
 | `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
@@ -80,11 +80,6 @@ deferred.
 have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
 through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
 `\Sexpr`.
-`eval` is held back for a different reason again: it is the one target that
-runs its input rather than parsing it, so until a batch run on real bots has
-shown its timeout and memory profile to be quiet it stays out of the public
-tracker. A first quiet run is all it waits for; [`docs/eval.md`](./docs/eval.md)
-explains its execution budget and what it does and does not let the input do.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 

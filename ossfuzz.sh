@@ -323,14 +323,11 @@ mkdir -p "$SEED_STAGE/unserialize"
 # target is just deleting its name here.  rd waits on two R bugs its first
 # runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
 # (reached through \encoding{}) and parse_Rd() never returning on an
-# unterminated \Sexpr.  eval is held back only for its first cycle: it is
-# the one target that runs its input rather than parsing it, and until a
-# batch run on real bots has shown its timeout and memory profile to be
-# quiet, a flood of low-value timeout reports is the risk (docs/eval.md).
+# unterminated \Sexpr.
 # ClusterFuzzLite is not so constrained (findings stay within this
 # repository's CI), so .clusterfuzzlite/build.sh clears the list and keeps
 # fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd eval}"
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
