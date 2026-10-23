@@ -32,25 +32,25 @@ docker/base/      base image holding a prebuilt, instrumented R
 
 | Target         | Exercises                                              |
 |----------------|--------------------------------------------------------|
-| `parse`        | `R_ParseVector` — the lexer/parser                     |
-| `unserialize`  | `unserialize()` / `readRDS` — the deserializer (security-critical) |
-| `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
-| `coerce`       | string→type conversion (`as.numeric`, `as.complex`, `as.logical`, `type.convert`) |
-| `datetime`     | `strptime` / `as.Date` / `as.POSIXct` / `as.POSIXlt` (`Rstrptime.h`, `datetime.c`) |
-| `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
-| `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
 | `agrep` \*     | `agrep` / `agrepl` — TRE approximate (edit-distance) matching |
-| `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
-| `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |
-| `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
-| `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
-| `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `character`    | character widths, substrings, quoting, names, and raw conversion |
-| `load`         | `load()` of pre-R-1.4 save files — the legacy ASCII/binary/XDR readers in `saveload.c` |
-| `zip`          | `unzip()` / `unz()` — the bundled minizip (`dounzip.c`)  |
+| `coerce`       | string→type conversion (`as.numeric`, `as.complex`, `as.logical`, `type.convert`) |
 | `connections`  | `file(encoding=)`, `gzfile`/`bzfile`/`xzfile`/`zstdfile`, `gzcon`, `rawConnection` — the connection layer's readers and re-encoding (`connections.c`) |
-| `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
+| `datetime`     | `strptime` / `as.Date` / `as.POSIXct` / `as.POSIXlt` (`Rstrptime.h`, `datetime.c`) |
+| `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
+| `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
+| `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
+| `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
+| `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
+| `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
+| `parse`        | `R_ParseVector` — the lexer/parser                     |
+| `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
+| `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
+| `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
+| `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |
+| `unserialize`  | `unserialize()` / `readRDS` — the deserializer (security-critical) |
+| `zip`          | `unzip()` / `unz()` — the bundled minizip (`dounzip.c`)  |
 
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
 manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see
