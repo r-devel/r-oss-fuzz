@@ -284,16 +284,25 @@ static void fuzz_init_r(void)
      * faults still get full ASAN reports and clean deduplication. */
     R_SignalHandlers = 0;
 
+    /* The two halves of Rf_initEmbeddedR, with the C stack check fixed
+     * up in between.  On Linux Rf_initialize_R takes R_CStackStart from
+     * __libc_stack_end, the main thread's stack, so from this thread
+     * every R_CheckStack() while setup_Rmainloop loads base would see
+     * terabytes of usage and R would abort ("unable to initialize the
+     * JIT").  macOS never sets it when embedded, which hides this
+     * locally.  Switch the check off for startup, then measure against
+     * this thread with R's own 5% of headroom for handling the overflow
+     * error: R_CheckStack() fires as an ordinary R error at
+     * 0.95 * FUZZ_R_STACK_SIZE rather than the sanitizer catching a fault.
+     * setup_Rmainloop itself would turn any limit above 100 MB into
+     * "unlimited", hence setting it after. */
     char *r_argv[] = {"R", "--vanilla", "--no-echo", "--no-restore"};
     int r_argc = sizeof(r_argv) / sizeof(r_argv[0]);
-    Rf_initEmbeddedR(r_argc, r_argv);
-
-    /* Rf_initialize_R measured the main thread's stack.  Measure against
-     * this thread's instead, keeping R's own 5% of headroom for handling
-     * the overflow error; R_CheckStack() then fires as an ordinary R error
-     * at 0.95 * FUZZ_R_STACK_SIZE instead of the sanitizer catching the
-     * fault on the main thread's 8 MiB. */
+    Rf_initialize_R(r_argc, r_argv);
     R_CStackStart = fuzz_r_thread.stack_top;
+    R_CStackLimit = (uintptr_t)-1;
+    R_Interactive = TRUE;   /* as Rf_initEmbeddedR */
+    setup_Rmainloop();
     R_CStackLimit = (uintptr_t)(0.95 * FUZZ_R_STACK_SIZE);
 
     fuzz_suppress_warnings();
