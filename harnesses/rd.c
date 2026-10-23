@@ -23,7 +23,7 @@ static SEXP make_wrapper(const char *source)
     return wrapper;
 }
 
-int LLVMFuzzerInitialize(int *argc, char ***argv)
+int fuzz_target_init(int *argc, char ***argv)
 {
     (void)argc;
     (void)argv;
@@ -43,7 +43,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+int fuzz_target_run(const uint8_t *data, size_t size)
 {
     if (size < 2 || size > FUZZ_MAX_INPUT || memchr(data + 1, '\0', size - 1))
         return 0;

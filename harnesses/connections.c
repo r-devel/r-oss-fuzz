@@ -125,7 +125,7 @@ static const char wrapper_write[] =
     "  gz <- gzcon(rawConnection(raw(0), 'w')); writeBin(x, gz); close(gz);"
     "  list(v, t) }";
 
-int LLVMFuzzerInitialize(int *argc, char ***argv)
+int fuzz_target_init(int *argc, char ***argv)
 {
     (void)argc;
     (void)argv;
@@ -195,7 +195,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+int fuzz_target_run(const uint8_t *data, size_t size)
 {
     if (size < 2 || size > FUZZ_MAX_INPUT)
         return 0;

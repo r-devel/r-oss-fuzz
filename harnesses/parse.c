@@ -72,7 +72,7 @@ static void run_slot(int selected)
     fuzz_eval_silent(calls[selected], R_GlobalEnv);
 }
 
-int LLVMFuzzerInitialize(int *argc, char ***argv)
+int fuzz_target_init(int *argc, char ***argv)
 {
     fuzz_init_r();
 
@@ -113,7 +113,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+int fuzz_target_run(const uint8_t *data, size_t size)
 {
     if (size < 2 || size > FUZZ_MAX_INPUT || memchr(data + 1, '\0', size - 1))
         return 0;

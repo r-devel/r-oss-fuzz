@@ -3,6 +3,7 @@
  *
  * Provides:
  *   fuzz_suppress_warnings() - Suppress R warnings to avoid buffer overflow
+ *   fuzz_run_on_r_thread()   - Run a function on the R thread (1 GiB stack)
  *   fuzz_init_r()            - Full R initialization sequence
  *   fuzz_set_string()        - Stage a string input under a toplevel context
  *   fuzz_set_string_ce()     - Stage a string with an explicit encoding mark
@@ -11,6 +12,8 @@
  *   fuzz_scratch_file()      - Per-process temp file for path-only entry points
  *   fuzz_write_scratch()     - Rewrite that file with the current input
  *   fuzz_repeat_product_excessive() - Guard against TRE repeat blowup
+ *   LLVMFuzzerInitialize / LLVMFuzzerTestOneInput - forward to the
+ *       harness's fuzz_target_init / fuzz_target_run on the R thread
  *
  * Adapted from r-afl's fuzz.h for use with libFuzzer instead of AFL++.
  */
@@ -19,6 +22,8 @@
 #define FUZZ_COMMON_H
 
 #include <limits.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +33,8 @@
 #define R_NO_REMAP 1
 #include <Rembedded.h>
 #include <Rinternals.h>
+#define CSTACK_DEFNS 1    /* R_CStackStart, R_CStackLimit */
+#define HAVE_UINTPTR_T 1
 #include <Rinterface.h>   /* R_SignalHandlers */
 #include <R_ext/Parse.h>
 
@@ -126,16 +133,139 @@ static void fuzz_set_vsize_limit(void)
 }
 
 /*
- * Initialize R for fuzzing.  Call once from LLVMFuzzerInitialize.
+ * Run R on its own thread with a large stack.
+ *
+ * Several of R's recursive C walkers never call R_CheckStack(): bind.c's
+ * AnswerType behind c(recursive = TRUE), deparse.c behind
+ * as.character(<list>), and the coerce, duplicate, identical and subassign
+ * walkers.  A list some tens of thousands deep, which an input can build
+ * at run time, overflows the 8 MiB main-thread stack in them.  Plain R
+ * reports "segfault from C stack overflow" and recovers, long-standing
+ * behaviour rather than a defect to report; under the sanitizers it is a
+ * stack-overflow crash that every target walking a nested value would
+ * keep rediscovering.
+ *
+ * The main thread's stack is fixed before the process starts, so R runs
+ * on a worker thread created with FUZZ_R_STACK_SIZE of stack instead:
+ * deep enough that any recursion an input can afford within the per-input
+ * limits completes, and virtual until touched, so it costs an idle target
+ * nothing.
+ *
+ * Everything that touches R -- initialization, every input, the checks
+ * under tests/ -- must run on that thread: R records its stack bounds
+ * once, and R_CheckStack() measures against them.  The libFuzzer entry
+ * points at the end of this header forward to fuzz_target_init and
+ * fuzz_target_run there, and fuzz_init_r() refuses to run anywhere else.
+ */
+#ifndef FUZZ_R_STACK_SIZE
+# define FUZZ_R_STACK_SIZE ((size_t)1 << 30)
+#endif
+
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+} fuzz_job_t;
+
+static struct {
+    pthread_t thread;
+    int started;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    fuzz_job_t *job;        /* set by the caller, cleared by the thread */
+    uintptr_t stack_top;    /* where the thread's frames begin */
+} fuzz_r_thread = {
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .cond = PTHREAD_COND_INITIALIZER
+};
+
+static void *fuzz_r_thread_main(void *unused)
+{
+    (void)unused;
+    /* The frame address rather than a local's: under ASAN an address-taken
+     * local may sit on the fake stack, nowhere near this thread's stack. */
+    fuzz_r_thread.stack_top = (uintptr_t)__builtin_frame_address(0);
+
+    /* libFuzzer's -timeout alarm is acted on only by the thread running
+     * its loop (the main thread); delivered here it would be ignored and
+     * the input would run on.  Block it so the kernel cannot pick this
+     * thread.  A timeout report therefore shows the main thread waiting
+     * rather than where R is; the testcase it writes still reproduces. */
+    sigset_t alarm;
+    sigemptyset(&alarm);
+    sigaddset(&alarm, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &alarm, NULL);
+
+    pthread_mutex_lock(&fuzz_r_thread.mutex);
+    for (;;) {
+        while (fuzz_r_thread.job == NULL)
+            pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
+        fuzz_job_t *job = fuzz_r_thread.job;
+        pthread_mutex_unlock(&fuzz_r_thread.mutex);
+
+        job->fn(job->arg);
+
+        pthread_mutex_lock(&fuzz_r_thread.mutex);
+        fuzz_r_thread.job = NULL;
+        pthread_cond_broadcast(&fuzz_r_thread.cond);
+    }
+    return NULL;
+}
+
+static int fuzz_on_r_thread(void)
+{
+    return fuzz_r_thread.started &&
+           pthread_equal(pthread_self(), fuzz_r_thread.thread);
+}
+
+/* Run fn(arg) on the R thread and wait for it to return, starting the
+ * thread on first use.  From the R thread itself this is a plain call. */
+static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
+{
+    if (!fuzz_r_thread.started) {
+        pthread_attr_t attr;
+        if (pthread_attr_init(&attr) != 0 ||
+            pthread_attr_setstacksize(&attr, FUZZ_R_STACK_SIZE) != 0 ||
+            pthread_create(&fuzz_r_thread.thread, &attr,
+                           fuzz_r_thread_main, NULL) != 0) {
+            fprintf(stderr, "fuzz: cannot start the R thread\n");
+            abort();
+        }
+        pthread_attr_destroy(&attr);
+        fuzz_r_thread.started = 1;
+    }
+
+    if (fuzz_on_r_thread()) {
+        fn(arg);
+        return;
+    }
+
+    fuzz_job_t job = { fn, arg };
+    pthread_mutex_lock(&fuzz_r_thread.mutex);
+    fuzz_r_thread.job = &job;
+    pthread_cond_broadcast(&fuzz_r_thread.cond);
+    while (fuzz_r_thread.job != NULL)
+        pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
+    pthread_mutex_unlock(&fuzz_r_thread.mutex);
+}
+
+/*
+ * Initialize R for fuzzing.  Call once from fuzz_target_init.
  *
  * Performs:
  *   1. Set R_HOME from binary location
  *   2. Cap the vector heap (must precede R's startup, which reads it)
  *   3. Initialize embedded R, without R's signal handlers
- *   4. Suppress warnings
+ *   4. Point R's C stack check at the R thread's stack
+ *   5. Suppress warnings
  */
 static void fuzz_init_r(void)
 {
+    if (!fuzz_on_r_thread()) {
+        fprintf(stderr, "fuzz_init_r: must run on the R thread "
+                        "(define fuzz_target_init, not LLVMFuzzerInitialize)\n");
+        abort();
+    }
+
     fuzz_set_r_home();
     fuzz_set_vsize_limit();
 
@@ -154,9 +284,26 @@ static void fuzz_init_r(void)
      * faults still get full ASAN reports and clean deduplication. */
     R_SignalHandlers = 0;
 
+    /* The two halves of Rf_initEmbeddedR, with the C stack check fixed
+     * up in between.  On Linux Rf_initialize_R takes R_CStackStart from
+     * __libc_stack_end, the main thread's stack, so from this thread
+     * every R_CheckStack() while setup_Rmainloop loads base would see
+     * terabytes of usage and R would abort ("unable to initialize the
+     * JIT").  macOS never sets it when embedded, which hides this
+     * locally.  Switch the check off for startup, then measure against
+     * this thread with R's own 5% of headroom for handling the overflow
+     * error: R_CheckStack() fires as an ordinary R error at
+     * 0.95 * FUZZ_R_STACK_SIZE rather than the sanitizer catching a fault.
+     * setup_Rmainloop itself would turn any limit above 100 MB into
+     * "unlimited", hence setting it after. */
     char *r_argv[] = {"R", "--vanilla", "--no-echo", "--no-restore"};
     int r_argc = sizeof(r_argv) / sizeof(r_argv[0]);
-    Rf_initEmbeddedR(r_argc, r_argv);
+    Rf_initialize_R(r_argc, r_argv);
+    R_CStackStart = fuzz_r_thread.stack_top;
+    R_CStackLimit = (uintptr_t)-1;
+    R_Interactive = TRUE;   /* as Rf_initEmbeddedR */
+    setup_Rmainloop();
+    R_CStackLimit = (uintptr_t)(0.95 * FUZZ_R_STACK_SIZE);
 
     fuzz_suppress_warnings();
 }
@@ -293,7 +440,7 @@ static Rboolean fuzz_set_raw_arg(SEXP call, const uint8_t *data, size_t size)
  * unzip(), file(encoding=)), so those targets rewrite one per-process
  * file each iteration instead of handing R a raw vector.  The file lives
  * in the system temp directory, which OSS-Fuzz runners allow writes to,
- * and is created once in LLVMFuzzerInitialize so fuzzing never pays a
+ * and is created once in fuzz_target_init so fuzzing never pays a
  * mkstemp per input.  Returns a malloc'd path, or NULL on failure.
  */
 static char *fuzz_scratch_file(const char *name)
@@ -388,6 +535,54 @@ static int fuzz_repeat_product_excessive(const char *pattern)
     }
 
     return 0;
+}
+
+/*
+ * libFuzzer entry points.
+ *
+ * A harness defines fuzz_target_init and fuzz_target_run with the
+ * LLVMFuzzerInitialize / LLVMFuzzerTestOneInput signatures; these run
+ * them on the R thread, one condition-variable handoff each way per input.
+ */
+int fuzz_target_init(int *argc, char ***argv);
+int fuzz_target_run(const uint8_t *data, size_t size);
+
+typedef struct {
+    int *argc;
+    char ***argv;
+    int result;
+} fuzz_init_job_t;
+
+static void fuzz_do_target_init(void *data)
+{
+    fuzz_init_job_t *job = data;
+    job->result = fuzz_target_init(job->argc, job->argv);
+}
+
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+    int result;
+} fuzz_run_job_t;
+
+static void fuzz_do_target_run(void *data)
+{
+    fuzz_run_job_t *job = data;
+    job->result = fuzz_target_run(job->data, job->size);
+}
+
+int LLVMFuzzerInitialize(int *argc, char ***argv)
+{
+    fuzz_init_job_t job = { argc, argv, 0 };
+    fuzz_run_on_r_thread(fuzz_do_target_init, &job);
+    return job.result;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+    fuzz_run_job_t job = { data, size, 0 };
+    fuzz_run_on_r_thread(fuzz_do_target_run, &job);
+    return job.result;
 }
 
 #endif /* FUZZ_COMMON_H */

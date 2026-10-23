@@ -80,9 +80,9 @@ static void check(const char *source, int expect_error, double expected)
     assert(eval_budget == 0);
 }
 
-int main(int argc, char **argv)
+static void run_checks(void *unused)
 {
-    LLVMFuzzerInitialize(&argc, &argv);
+    (void)unused;
     check("1 + 2 * 3", 0, 7);
     check("f <- function(x, y = x + 1) y * 2; f(3)", 0, 8);
     check("f <- function(x, y) x; f(42, missing_name)", 0, 42);
@@ -148,6 +148,27 @@ int main(int argc, char **argv)
         R_gc();
     }
 
+    /* Deep C recursion that R does not stack-check (bind.c, deparse.c)
+     * over a list an input can build within the budget: the R thread's
+     * stack absorbs it, so these complete rather than overflow.  deparse
+     * of such a value is quadratic in the depth; instrumentation/0005
+     * makes it poll, so the budget ends it as an R error instead of a
+     * timeout, while a depth deparse can handle still completes. */
+    const char *nest =
+        "x <- list(); for (i in 1:15000) "
+        "x <- list(list(list(list(list(list(list(list(x)))))))); ";
+    char deep_source[512];
+    snprintf(deep_source, sizeof(deep_source), "%s%s", nest, "length(c(x, recursive = TRUE))");
+    check(deep_source, 0, 0);
+    snprintf(deep_source, sizeof(deep_source), "%s%s", nest, "length(c(x, x)[[1]])");
+    check(deep_source, 0, 1);
+    snprintf(deep_source, sizeof(deep_source), "%s%s", nest, "as.character(x)");
+    check(deep_source, 1, 0);
+    check("x <- list(); for (i in 1:2000) x <- list(x); length(as.character(x))", 0, 1);
+    /* And R's own check still fires, as an R error, for recursion it sees. */
+    check("f <- function(n) if (n > 0) f(n - 1) else 0; f(100000)", 1, 0);
+    assert(R_CStackLimit == (uintptr_t)(0.95 * FUZZ_R_STACK_SIZE));
+
     /* The budget bounds work, not time: a loop that fits runs to the end,
      * and the same input gives the same answer every time. */
     for (int i = 0; i < 3; i++)
@@ -208,5 +229,12 @@ int main(int argc, char **argv)
     LLVMFuzzerTestOneInput(nul, FUZZ_MAX_INPUT + 1);
     check("40 + 2", 0, 42);
     puts("eval harness checks passed");
+}
+
+int main(int argc, char **argv)
+{
+    LLVMFuzzerInitialize(&argc, &argv);
+    /* The checks call R directly, so they run where R does. */
+    fuzz_run_on_r_thread(run_checks, NULL);
     return 0;
 }
