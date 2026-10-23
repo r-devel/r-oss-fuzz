@@ -34,8 +34,8 @@
 #define FUZZ_MAX_NODES 1024
 
 /* Interrupt checks one input may make before it is cut off.  eval() checks
- * for interrupts once per 10 evaluations in a fuzzing build (patches/0054;
- * stock R: once per 1000) and C loops that call R_CheckUserInterrupt add
+ * for interrupts once per 10 evaluations (instrumentation/0001; stock R:
+ * once per 1000) and C loops that call R_CheckUserInterrupt add
  * their own, so this is roughly 200k evaluations: well under a second even
  * with sanitizers, and deterministic, which a wall-clock limit is not.
  * See eval_poll_budget. */
@@ -109,7 +109,7 @@ typedef struct {
  * R_CheckUserInterrupt() -> R_ProcessEvents() -> R_PolledEvents() is the
  * hook R offers for event loops, and it is reached from the same places
  * that honour setTimeLimit(): every 10th eval() of the AST interpreter
- * (every 1000th in stock R; patches/0054 lowers it for fuzzing builds),
+ * (every 1000th in stock R; instrumentation/0001 lowers it),
  * the byte-code loop back-edges, and the long-running C loops that poll
  * for interrupts.  Counting those calls instead of CPU time gives every
  * input the same budget on every machine, so an input that is cut off
@@ -124,7 +124,7 @@ typedef struct {
  * `x <- !1:4e4; repeat !x` ran 15 s under ASAN before the budget was
  * spent, and would have been filed as a timeout.  Three things bound that.
  * The heap is small (8 MiB), which caps the work of any one evaluation.
- * The check interval is short (patches/0054), which caps the number of
+ * The check interval is short (instrumentation/0001), which caps the number of
  * evaluations between two checks.  And a CPU backstop ends the input at
  * the first check after FUZZ_EVAL_CPU_LIMIT seconds, whatever the budget
  * says.  The backstop is the one timing-dependent limit left, and it only

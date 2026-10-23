@@ -86,13 +86,10 @@ things bound it now.
   64 MiB initial heap, so the harness lowers `R_VSIZE` as well.
 - **The check interval is short.** Stock R polls once per 1000
   evaluations, so a thousand heap-sized operations fit between two checks.
-  [`patches/0054`](../patches/0054-eval-poll-for-interrupts-more-often-in-fuzzing-builds.patch)
-  makes fuzzing builds (`FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`, which
-  every OSS-Fuzz build defines) poll every 10 evaluations and every 128
-  byte-code instructions. That is the one carried patch that is an
-  adjustment rather than a fix; it stays for as long as this target needs
-  it, and the harness still works without it, only slower to cut inputs
-  off.
+  [`instrumentation/0001`](../instrumentation/0001-eval-poll-for-interrupts-more-often.patch)
+  makes the fuzzed R poll every 10 evaluations and every 128 byte-code
+  instructions. It stays for as long as this target needs it, and the
+  harness still works without it, only slower to cut inputs off.
 - **A CPU backstop** ends the input at the first check after one CPU
   second, whatever the budget says. It is the only timing-dependent limit
   left. It decides whether a vector-heavy input completes or errors, never

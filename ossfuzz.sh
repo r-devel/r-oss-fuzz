@@ -35,8 +35,9 @@ LIBDEFLATE_VERSION="${LIBDEFLATE_VERSION:-1.26}"
 # Two more serve the CI checks on patches/ (.github/workflows/patches-apply.yml
 # and the pull-request runs of base-image.yml):
 #
-#   R_PATCH_STRICT=1   a patch that does not apply, or is already applied,
-#                      fails the build instead of being reported and skipped
+#   R_PATCH_STRICT=1   a patch (patches/ or instrumentation/) that does not
+#                      apply, or is already applied, fails the build instead
+#                      of being reported and skipped
 #   R_PATCH_ONLY=1     apply the patches, then stop before configuring R
 #
 # All four are unset in the OSS-Fuzz build, which builds R from source as usual.
@@ -56,16 +57,22 @@ else
     cd "$R_SOURCE"
 
     ####################################################################
-    # Local patches
+    # Local patches and instrumentation
     ####################################################################
-    # patches/ carries fixes that have not landed in R yet, applied in
-    # filename order (hence the numeric prefixes -- one patch may depend
-    # on an earlier one).  One exception is a fuzzing-mode adjustment
-    # rather than a fix (0054, the interrupt-check interval the eval
-    # target's budget relies on); its header says so.
+    # Two directories of patches are applied to the R source, in filename
+    # order within each (hence the numeric prefixes -- one patch may
+    # depend on an earlier one), patches/ first:
     #
-    # These are not cosmetic.  Fuzzing an R with a known crash is worse
-    # than it sounds: libFuzzer replays the entire stored corpus at
+    #   patches/          fixes for defects in R that have not landed yet.
+    #                     Temporary by nature: delete each one once the
+    #                     fix is in trunk.
+    #   instrumentation/  changes that make R easier to fuzz but fix
+    #                     nothing -- poll intervals, limits, hooks.
+    #                     Permanent, never for upstream, and may assume
+    #                     the fixes above are in place.
+    #
+    # The fixes are not cosmetic.  Fuzzing an R with a known crash is
+    # worse than it sounds: libFuzzer replays the entire stored corpus at
     # startup, so a single crashing input stops a target from fuzzing at
     # all, and no amount of CI configuration changes that.  Patching the
     # crash out restores forward progress until the real fix lands.
@@ -77,38 +84,50 @@ else
     # in the log:
     #
     #   "already applied"  the fix landed upstream -- delete the patch
+    #                      (for instrumentation/ this cannot legitimately
+    #                      happen, and is reported as such)
     #   "does not apply"   context drifted -- the bug is probably still
     #                      live, so the patch needs rebasing
-    if [ -d "$REPO/patches" ]; then
-        n_applied=0; n_already=0; n_failed=0
-        for p in "$REPO"/patches/*.patch; do
+    apply_patch_dir() {
+        local dir="$1" kind="$2"
+        [ -d "$dir" ] || return 0
+
+        local n_applied=0 n_already=0 n_failed=0 p name
+        for p in "$dir"/*.patch; do
             [ -e "$p" ] || continue
             name=$(basename "$p")
             if patch -p1 --dry-run --force --silent < "$p" >/dev/null 2>&1; then
                 patch -p1 --force --silent < "$p" >/dev/null
-                echo "ossfuzz.sh: patch $name: applied"
+                echo "ossfuzz.sh: $kind $name: applied"
                 n_applied=$((n_applied + 1))
             elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
-                echo "ossfuzz.sh: patch $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+                if [ "$kind" = patch ]; then
+                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+                else
+                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- did trunk adopt it? check" >&2
+                fi
                 n_already=$((n_already + 1))
             else
-                echo "ossfuzz.sh: patch $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
+                echo "ossfuzz.sh: $kind $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
                 n_failed=$((n_failed + 1))
             fi
         done
-        echo "ossfuzz.sh: patches: $n_applied applied, $n_already already applied, $n_failed failed"
+        echo "ossfuzz.sh: $(basename "$dir")/: $n_applied applied, $n_already already applied, $n_failed failed"
 
         # The CI checks want the opposite of the tolerance above: a patch
         # that no longer applies, or has landed upstream, must fail there
         # so it gets rebased or deleted before it reaches a real build.
         if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
-            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) patch(es) above" >&2
+            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) $kind(es) above" >&2
             exit 1
         fi
-    fi
+    }
+
+    apply_patch_dir "$REPO/patches" patch
+    apply_patch_dir "$REPO/instrumentation" instrumentation
 
     if [ -n "${R_PATCH_ONLY:-}" ]; then
-        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches applied, stopping before the R build"
+        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches and instrumentation applied, stopping before the R build"
         exit 0
     fi
 

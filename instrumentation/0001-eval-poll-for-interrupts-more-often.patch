@@ -1,4 +1,4 @@
-Poll for interrupts more often in fuzzing builds.
+Poll for interrupts every 10 evaluations instead of every 1000.
 
 eval() checks for interrupts, time limits and pending finalizers once per
 1000 evaluations, and the byte-code interpreter once per 1024
@@ -9,44 +9,37 @@ be a whole-heap vector operation, so a thousand of them can run for
 minutes between two checks, long past the fuzzer's timeout threshold,
 while the budget sees nothing.
 
-Under FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION (defined by every OSS-Fuzz
-build) poll every 10 evaluations and every 128 byte-code instructions
-instead. Interrupt checks are cheap next to sanitizer instrumentation,
-and production builds are unchanged.
+Poll every 10 evaluations and every 128 byte-code instructions instead.
+Interrupt checks are cheap next to sanitizer instrumentation.
 
-This is a fuzzing-mode adjustment, not a bug fix: it is not meant for
-upstream and stays carried for as long as the eval target depends on it
-(see docs/eval.md). The harness degrades gracefully without it -- its
-CPU backstop still bounds each input -- but vector-heavy inputs then run
-for seconds rather than milliseconds.
+Instrumentation, not a fix: this changes nothing R gets wrong and is not
+for upstream. It stays for as long as the eval target depends on it (see
+docs/eval.md). The harness degrades gracefully without it -- its CPU
+backstop still bounds each input -- but vector-heavy inputs then run for
+seconds rather than milliseconds.
 
 diff --git a/src/main/eval.c b/src/main/eval.c
-index 010e53e47f..b4862b2607 100644
+index 010e53e47f..11a70a069f 100644
 --- a/src/main/eval.c
 +++ b/src/main/eval.c
-@@ -33,6 +33,21 @@
+@@ -33,6 +33,16 @@
  #include <math.h>
  
  static SEXP bcEval(SEXP, SEXP);
 +
 +/* How many evaluations (AST interpreter) or instructions (byte-code
 +   interpreter) go by between checks for interrupts, time limits and
-+   pending finalizers.  Fuzzing builds poll far more often: the fuzz
-+   harnesses bound each input's work from R_PolledEvents, which is reached
-+   only from these checks, and an input whose evaluations are all
-+   heap-sized vector operations can otherwise run for minutes between two
-+   of them.  Interrupt checks are cheap next to sanitizer instrumentation. */
-+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-+# define EVAL_COUNT_DELTA 10
-+# define BC_COUNT_DELTA 127
-+#else
-+# define EVAL_COUNT_DELTA 1000
-+# define BC_COUNT_DELTA 1023
-+#endif
++   pending finalizers.  Stock R uses 1000 and 1023.  The fuzz harnesses
++   bound each input's work from R_PolledEvents, which is reached only from
++   these checks, and an input whose evaluations are all heap-sized vector
++   operations can otherwise run for minutes between two of them; interrupt
++   checks are cheap next to sanitizer instrumentation. */
++#define EVAL_COUNT_DELTA 10
++#define BC_COUNT_DELTA 127
  static void bcEval_init(void);
  
  /* BC_PROFILING needs to be enabled at build time. It is not enabled
-@@ -1088,7 +1103,7 @@ SEXP eval(SEXP e, SEXP rho)
+@@ -1088,7 +1098,7 @@ SEXP eval(SEXP e, SEXP rho)
  
      /* this is needed even for self-evaluating objects or something like
         'while (TRUE) NULL' will not be interruptable */
@@ -55,7 +48,7 @@ index 010e53e47f..b4862b2607 100644
  	R_CheckUserInterrupt();
  #ifndef IMMEDIATE_FINALIZERS
  	/* finalizers are run here since this should only be called at
-@@ -6266,7 +6281,6 @@ static void bc_check_sigint(void)
+@@ -6266,7 +6276,6 @@ static void bc_check_sigint(void)
  #endif
  }
  
@@ -63,7 +56,7 @@ index 010e53e47f..b4862b2607 100644
  #define BC_CHECK_SIGINT() do {			\
  	if (++evalcount > BC_COUNT_DELTA) {	\
  	    bc_check_sigint();			\
-@@ -6275,7 +6289,7 @@ static void bc_check_sigint(void)
+@@ -6275,7 +6284,7 @@ static void bc_check_sigint(void)
      } while (0)
  
  /* use loop index for faster check */

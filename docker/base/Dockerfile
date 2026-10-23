@@ -44,6 +44,7 @@ RUN /opt/checkout-r.sh
 # the two setups cannot drift apart in how R itself is built.
 COPY ossfuzz.sh /opt/ossfuzz.sh
 COPY patches /opt/patches
+COPY instrumentation /opt/instrumentation
 COPY docker/base/build-r.sh /opt/build-r.sh
 
 # Pull-request builds of this image (base-image.yml) pass R_PATCH_STRICT=1 so
