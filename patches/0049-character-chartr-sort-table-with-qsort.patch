@@ -1,5 +1,5 @@
 Sort chartr()'s wide-character translation table with qsort() instead
-of an insertion sort.
+of an insertion sort, and validate UTF-8 specs before expanding ranges.
 
 do_chartr() (src/main/character.c) expands every range in 'old' into
 one entry of its xtable, then sorts the table with the ISORT macro (an
@@ -18,20 +18,34 @@ tie-breaker so that the last mapping given for a character still wins
 being so), and dedup in a single pass.  The ISORT, COMPRESS and SWAP
 macros had no other users.
 
-The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
+The second part bounds the table itself.  utf8towcs() still decodes
+the withdrawn RFC 2279 5- and 6-byte forms, so a UTF-8-marked 'old'
+such as ")-\xfb\x9f\xbf\xbf\x9a" is a range up to U+37FFFDA and a
+58-million-entry table (a 6-byte form reaches 2^31 entries and
+overflows the int count).  Insertion sort is linear on that single
+sorted run, but qsort() is not, and under ASAN the sort alone took 34s
+on the bot.  Reject such specs with utf8Valid(), as nchar() and
+substr() already do, which caps a range at the 1114111 Unicode code
+points (~0.1s even for the two-run case).
+
+The upstream PR also adds regression tests (tests/reg-tests-1e.R), not
 carried here.
 
-Found by OSS-Fuzz (libFuzzer_r_character, testcase 6599770911866880:
-Timeout in do_chartr from chartr(old, toupper(old), x) with a spec that
-contains "i-\U1F600" twice).  Not a regression: the range just brackets
-the harness change that added the chartr slots (PR #35).
+Found by OSS-Fuzz (libFuzzer_r_character): testcase 6599770911866880
+(Timeout in do_chartr from chartr(old, toupper(old), x) with a spec
+that contains "i-\U1F600" twice; not a regression, the range just
+brackets the harness change that added the chartr slots, PR #35) and
+testcase 4792776198520832 (one-time Timeout in qsort_r under do_chartr
+with the 5-byte range end above, first seen in the build that carried
+the qsort change).
 
-Upstream status: r-devel/r-svn PR #390, filed 2026-10-20; no Bugzilla
-report yet.
+Upstream status: r-devel/r-svn PR #390, filed 2026-10-20, second
+commit added 2026-10-22; no Bugzilla report yet.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
 diff --git a/src/main/character.c b/src/main/character.c
+index 5ba818eb39..f52bd0ec26 100644
 --- a/src/main/character.c
 +++ b/src/main/character.c
 @@ -1365,11 +1365,16 @@ tr_get_next_char_from_spec(struct tr_spec **p) {
@@ -94,7 +108,25 @@ diff --git a/src/main/character.c b/src/main/character.c
  #define BSEARCH(_rc,_key,_base,_nmemb,_TYPE,_comp)             \
  {                                                              \
      size_t l, u, idx;                                          \
-@@ -1563,11 +1535,18 @@ attribute_hidden SEXP do_chartr(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1495,6 +1467,9 @@ attribute_hidden SEXP do_chartr(SEXP call, SEXP op, SEXP args, SEXP env)
+ 	/* Build the old and new wtr_spec lists. */
+ 	if (use_WC && IS_UTF8(STRING_ELT(old, 0))) {
+ 	    s = CHAR(STRING_ELT(old, 0));
++	    /* utf8towcs() still decodes the withdrawn 5- and 6-byte forms,
++	       so without this check a range can span 2^31 code points. */
++	    if (!utf8Valid(s)) error(_("invalid UTF-8 string 'old'"));
+ 	    nc = (int) utf8towcs(NULL, s, 0);
+ 	    if (nc < 0) error(_("invalid UTF-8 string 'old'"));
+ 	    wc = (wchar_t *) R_AllocStringBuffer((nc+1)*sizeof(wchar_t), &cbuff);
+@@ -1520,6 +1495,7 @@ attribute_hidden SEXP do_chartr(SEXP call, SEXP op, SEXP args, SEXP env)
+ 
+ 	if (use_WC && IS_UTF8(STRING_ELT(_new, 0))) {
+ 	    s = CHAR(STRING_ELT(_new, 0));
++	    if (!utf8Valid(s)) error(_("invalid UTF-8 string 'new'"));
+ 	    nc = (int) utf8towcs(NULL, s, 0);
+ 	    if (nc < 0) error(_("invalid UTF-8 string 'new'"));
+ 	    wc = (wchar_t *) R_AllocStringBuffer((nc+1)*sizeof(wchar_t), &cbuff);
+@@ -1563,11 +1539,18 @@ attribute_hidden SEXP do_chartr(SEXP call, SEXP op, SEXP args, SEXP env)
  	    else {
  		xtable[i].c_old = c_old;
  		xtable[i].c_new = c_new;
