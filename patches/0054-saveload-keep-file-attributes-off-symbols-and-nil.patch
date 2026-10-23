@@ -1,0 +1,44 @@
+Do not apply a version-1 save file's levels, object bit and attributes to symbols or R_NilValue.
+
+NewReadItem() resolves a SYMSXP item to the interned symbol from the
+file's symbol table (index 0, or an unrecognized primitive, to
+R_NilValue) and then applies the item's LEVELS, OBJECT bit and attribute
+list to that shared object, exactly as it does for a freshly allocated
+one. A well-formed 30-byte RDA1 file therefore leaves an interned symbol
+with attributes and the object bit set ("****found a symbol with
+attributes" at every later garbage collection), makes it evaluate as a
+..N reference (levels bit 1) or bypass the environment chain (base
+symbol cache bit), or puts attributes and the object bit on NULL itself,
+for the rest of the session.
+
+The writer emits an attribute item for every object, so the reader still
+consumes it for these cases but leaves the object alone.
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
+carried here.
+
+Found while triaging the OSS-Fuzz aftermath crashers 6196191659098112
+and 4716725078392832 (afl_r_load), whose logs carry the symbol warning.
+
+Upstream status: r-devel/r-svn PR #399, filed 2026-10-23.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -1300,6 +1300,16 @@
+     default:
+ 	error(_("NewReadItem: unknown type %i"), type);
+     }
++    /* A symbol item resolves to the interned symbol, and an index of 0
++       (or an unrecognized primitive) to R_NilValue: both are shared, so
++       the levels, object bit and attributes in the file must not be
++       applied to them.  The writer still emits an attribute item for
++       every object, so read it to stay in step with the stream. */
++    if (TYPEOF(s) == SYMSXP || s == R_NilValue) {
++	NewReadItem(sym_table, env_table, fp, m, d);
++	UNPROTECT(1); /* s */
++	return s;
++    }
+     SETLEVELS(s, (unsigned short) levs);
+     SET_OBJECT(s, objf);
+     SET_ATTRIB(s, NewReadItem(sym_table, env_table, fp, m, d));
