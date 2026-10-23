@@ -1,0 +1,6 @@
+Light Goldenrod Yellow
+GREY100
+gray0
+darkslategray4
+white
+#00000000

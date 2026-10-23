@@ -1,0 +1,4 @@
+name,score,grade
+ann,90,A
+bob,NA,"B+"
+cy,"7,5",C

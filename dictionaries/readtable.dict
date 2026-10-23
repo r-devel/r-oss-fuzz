@@ -1,0 +1,75 @@
+#
+# libFuzzer dictionary for read.table / count.fields / write.table.
+#
+# Separators, quoting, comment and escape characters, the header line
+# shapes read.table auto-detects, NA strings, and literals that
+# type.convert promotes or refuses.
+#
+
+# Field separators
+","
+";"
+"\x09"
+" "
+"|"
+
+# Quotes and escapes
+"\""
+"'"
+"\"\""
+"\\\""
+"\\'"
+"\\n"
+"\\t"
+"\\\\"
+"\\x41"
+"\\101"
+
+# Line endings
+"\x0a"
+"\x0d\x0a"
+"\x0d"
+
+# Comments and blanks
+"#"
+"# "
+"\x0a\x0a"
+"\x0a \x0a"
+
+# Header shapes
+"a,b,c\x0a"
+"\"a\",\"b\"\x0a"
+"x\x09y\x09z\x0a"
+"V1 V2 V3\x0a"
+
+# Row-name and NA tokens
+"NA"
+"\"NA\""
+"-"
+"?"
+"NULL"
+"NaN"
+"Inf"
+"-Inf"
+
+# Values type.convert cares about
+"TRUE"
+"FALSE"
+"T"
+"F"
+"0"
+"1"
+"-1"
+"1e5"
+"1e-5"
+"1.5"
+"1,5"
+"0x1A"
+"0x1.8p1"
+"3+4i"
+"1L"
+"9007199254740993"
+"18446744073709551616"
+"2024-01-01"
+".5"
+"5."
