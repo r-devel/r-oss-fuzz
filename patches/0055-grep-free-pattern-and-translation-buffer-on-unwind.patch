@@ -1,0 +1,430 @@
+Free the compiled pattern and the translation buffer when grep() unwinds.
+
+do_grep() and do_regexpr() (src/main/grep.c) compile the pattern with
+malloc() and free it after the loop over the text vector.  An input
+string that cannot be translated to the wide-character or UTF-8 form
+draws a warning inside that loop, which options(warn = 2) turns into an
+error, and a failed R allocation inside the loop errors as well; either
+unwind skips the free.  The loop now runs under a CTXT_CCODE context
+whose cleanup releases the pattern, as read.dcf() does for its regexps.
+
+The translation helpers in src/main/sysutils.c (translateToNative(),
+translateToUTF8(), translateToWchar()) signalled the "unable to
+translate" warning while the caller's malloc()ed string buffer was still
+live, so the same unwind leaked the buffer too.  They now build the
+message, release the buffer and then signal; installTrChar() asks for
+the plain translation and warns itself after install().
+
+Found by OSS-Fuzz: testcase 6188059406958592 (libFuzzer_r_load,
+Direct-leak, R_AllocStringBuffer <- translateToWchar <- Rf_wtransChar2
+<- do_grep).  The harness caps the vector heap at 1 GB; a long run of
+the load target drifted towards it, and the allocation errors inside
+the grepl() that load() runs on the file's magic number leaked 103
+compiled patterns and 102 translation buffers over the run.
+
+Generated against a tree with the earlier patches applied (0032 touches
+installTrChar() as well), so it has to stay after them in the sequence.
+
+Upstream status: r-devel/r-svn PR #400, filed 2026-10-23 (no Bugzilla
+report yet).
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/grep.c b/src/main/grep.c
+index 844991d2eb..a8388a1fa7 100644
+--- a/src/main/grep.c
++++ b/src/main/grep.c
+@@ -61,6 +61,7 @@
+ /* How many encoding warnings to give */
+ #define NWARN 5
+ 
++#define R_USE_SIGNALS 1 /* for the cleanup context in do_grep/do_regexpr */
+ #include <Defn.h>
+ #include <Internal.h>
+ #include <R_ext/RS.h>  /* for R_Calloc/R_Free */
+@@ -1264,6 +1265,53 @@
+     return -1;
+ }
+ 
++/* The compiled pattern is malloc()ed, and the matching loops of do_grep()
++   and do_regexpr() signal warnings about untranslatable input strings,
++   which options(warn = 2) turns into errors.  They run under a context
++   whose cleanup releases the pattern on such an unwind.  The context
++   carries the call so that getCurrentCall() still finds it for the
++   warnings when the .Internal is not reached from byte code. */
++typedef struct {
++    bool fixed_opt, perl_opt;
++    regex_t *reg;
++    const unsigned char *tables;
++#ifdef HAVE_PCRE2
++    pcre2_code *re;
++    pcre2_match_data *mdata;
++    pcre2_match_context *mcontext;
++#else
++    pcre *re_pcre;
++    pcre_extra *re_pe;
++    int *ovector;
++#endif
++} regex_cleanup_info;
++
++static void regex_cleanup(void *data)
++{
++    regex_cleanup_info *ci = (regex_cleanup_info *) data;
++
++    if (ci->fixed_opt)
++	return;
++    if (ci->perl_opt) {
++#ifdef HAVE_PCRE2
++	pcre2_match_data_free(ci->mdata);
++	pcre2_code_free(ci->re);
++	pcre2_match_context_free(ci->mcontext);
++	if (ci->tables)
++	    /* new PCRE2 will have pcre2_maketables_free() */
++	    free((void *) ci->tables);
++#else
++	if (ci->re_pe)
++	    pcre_free_study(ci->re_pe);
++	pcre_free(ci->re_pcre);
++	pcre_free((void *) ci->tables);
++	free(ci->ovector);
++#endif
++    } else {
++	tre_regfree(ci->reg);
++    }
++}
++
+ attribute_hidden SEXP do_grep(SEXP call, SEXP op, SEXP args, SEXP env)
+ {
+     SEXP pat, text, ind, ans;
+@@ -1383,6 +1431,26 @@
+ 	if (rc) reg_report(rc, &reg, spat);
+     }
+ 
++    regex_cleanup_info ci;
++    ci.fixed_opt = fixed_opt;
++    ci.perl_opt = perl_opt;
++    ci.reg = &reg;
++    ci.tables = tables;
++#ifdef HAVE_PCRE2
++    ci.re = re;
++    ci.mdata = mdata;
++    ci.mcontext = mcontext;
++#else
++    ci.re_pcre = re_pcre;
++    ci.re_pe = re_pe;
++    ci.ovector = NULL;
++#endif
++    RCNTXT cntxt;
++    begincontext(&cntxt, CTXT_CCODE, call, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &regex_cleanup;
++    cntxt.cenddata = &ci;
++
+     PROTECT(ind = allocVector(LGLSXP, n));
+     vmax = vmaxget();
+     for (i = 0 ; i < n ; i++) {
+@@ -1453,22 +1521,8 @@
+ 	if (invert ^ LOGICAL(ind)[i]) nmatches++;
+     }
+ 
+-    if (fixed_opt);
+-    else if (perl_opt) {
+-#ifdef HAVE_PCRE2
+-	pcre2_match_data_free(mdata);
+-	pcre2_code_free(re);
+-	pcre2_match_context_free(mcontext);
+-	if (tables)
+-	    /* new PCRE2 will have pcre2_maketables_free() */
+-	    free((void *)tables);
+-#else
+-	if (re_pe) pcre_free_study(re_pe);
+-	pcre_free(re_pcre);
+-	pcre_free((void *)tables);
+-#endif
+-    } else
+-	tre_regfree(&reg);
++    endcontext(&cntxt);
++    regex_cleanup(&ci);
+ 
+     if (PRIMVAL(op)) {/* grepl case */
+ 	UNPROTECT(1); /* ind */
+@@ -3133,6 +3187,26 @@
+ 	if (rc) reg_report(rc, &reg, spat);
+     }
+ 
++    regex_cleanup_info ci;
++    ci.fixed_opt = fixed_opt;
++    ci.perl_opt = perl_opt;
++    ci.reg = &reg;
++    ci.tables = tables;
++#ifdef HAVE_PCRE2
++    ci.re = re;
++    ci.mdata = mdata;
++    ci.mcontext = mcontext;
++#else
++    ci.re_pcre = re_pcre;
++    ci.re_pe = re_pe;
++    ci.ovector = ovector;
++#endif
++    RCNTXT cntxt;
++    begincontext(&cntxt, CTXT_CCODE, call, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &regex_cleanup;
++    cntxt.cenddata = &ci;
++
+     if (PRIMVAL(op) == 0) { /* regexpr */
+ 	SEXP matchlen, capture_start, capturelen;
+ 	int *is, *il;
+@@ -3318,24 +3392,10 @@
+ 	}
+     }
+ 
+-    if (fixed_opt) ;
+-    else if (perl_opt) {
+-#ifdef HAVE_PCRE2
+-	pcre2_match_data_free(mdata);
+-	pcre2_code_free(re);
+-	pcre2_match_context_free(mcontext);
+-	if (tables)
+-	    /* new PCRE2 will have pcre2_maketables_free() */
+-	    free((void *)tables);
+-#else
+-	if (re_pe) pcre_free_study(re_pe);
+-	pcre_free(re_pcre);
+-	pcre_free((void *)tables);
+-	free(ovector);
+-#endif
+-	UNPROTECT(1);
+-    } else
+-	tre_regfree(&reg);
++    endcontext(&cntxt);
++    regex_cleanup(&ci);
++    if (perl_opt)
++	UNPROTECT(1); /* capture_names */
+ 
+     UNPROTECT(2);
+     return ans;
+diff --git a/src/main/sysutils.c b/src/main/sysutils.c
+index 26fadc0275..890db05566 100644
+--- a/src/main/sysutils.c
++++ b/src/main/sysutils.c
+@@ -1720,8 +1720,26 @@
+ static void *latin1_obj = NULL, *utf8_obj=NULL, *ucsmb_obj=NULL,
+     *ucsutf8_obj=NULL;
+ 
++/* Copy a translated string into a fixed-size message buffer, truncating
++   long ones, so that the string buffer can be released before the
++   message is signalled. */
++static void truncateForMessage(char dest[256], const char *src)
++{
++    if (strlen(src) > 255) {
++	strncpy(dest, src, 252);
++	dest[252] = '\0';
++	mbcsTruncateToValid(dest);
++	strcat(dest, "...");
++    } else {
++	strcpy(dest, src);
++    }
++}
++
+ /* Translates string in "ans" to native encoding returning it in string
+-   buffer "cbuff". */
++   buffer "cbuff".  Returns non-zero if some of it could not be translated
++   (and was escaped instead); with mustWork == 2 that is also warned about,
++   with mustWork == 1 it is an error.  In both of those cases the buffer
++   has been released before the condition is signalled. */
+ static int translateToNative(const char *ans, R_StringBuffer *cbuff,
+ 			     nttype_t ttype, int mustWork)
+ {
+@@ -1825,26 +1843,20 @@
+     }
+     *outbuf = '\0';
+     if (mustWork && failed) {
+-	/* copy to truncate and in case of error prevent memory leak */
++	/* Release the buffer before signalling: options(warn = 2) turns
++	   the warning into an error, and the unwind would leak it. */
+ 	char err_buff[256];
+-	if (strlen(cbuff->data) > 255) {
+-	    strncpy(err_buff, cbuff->data, 252);
+-	    err_buff[252] = '\0';
+-	    mbcsTruncateToValid(err_buff);
+-	    strcat(err_buff, "...");
+-	} else
+-	    strcpy(err_buff, cbuff->data);
+-
++	truncateForMessage(err_buff, cbuff->data);
++	R_FreeStringBuffer(cbuff);
+ 	if (mustWork == 2) {
+ 	    warning(_("unable to translate '%s' to native encoding"),
+ 		    err_buff);
+ 	    return 1;
+ 	} else {
+-	    R_FreeStringBuffer(cbuff);
+ 	    error(_("unable to translate '%s' to native encoding"), err_buff);
+ 	}
+     }
+-    return 0;
++    return failed;
+ }
+ 
+ static const char *copyAndFreeStringBuffer(R_StringBuffer *cbuff)
+@@ -1895,11 +1907,9 @@
+     if (t == NT_NONE) return ans;
+ 
+     R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+-    if (translateToNative(ans, &cbuff, t, 2)) {
+-	R_FreeStringBuffer(&cbuff);
+-	return NULL;
+-    } else
+-	return copyAndFreeStringBuffer(&cbuff);
++    if (translateToNative(ans, &cbuff, t, 2))
++	return NULL; /* buffer already released */
++    return copyAndFreeStringBuffer(&cbuff);
+ }
+ 
+ SEXP installTrChar(SEXP x)
+@@ -1910,8 +1920,13 @@
+ 
+     R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+     // For back-compatibility this allows installing
+-    // symbols with escapes, with a warning.
+-    translateToNative(CHAR(x), &cbuff, t, 2);
++    // symbols with escapes, with a warning.  The warning is signalled
++    // once the buffer has been released, as options(warn = 2) makes it
++    // an error.
++    bool failed = translateToNative(CHAR(x), &cbuff, t, 0);
++    char err_buff[256];
++    if (failed)
++	truncateForMessage(err_buff, cbuff.data);
+ 
+     /* install() raises this itself, but then the buffer would leak. */
+     if (strlen(cbuff.data) > MAXIDSIZE) {
+@@ -1920,6 +1935,8 @@
+     }
+     SEXP Sans = install(cbuff.data);
+     R_FreeStringBuffer(&cbuff);
++    if (failed)
++	warning(_("unable to translate '%s' to native encoding"), err_buff);
+     return Sans;
+ }
+ 
+@@ -1956,7 +1973,7 @@
+ }
+ 
+ /* Translates string in "ans" to UTF-8 returning it in string
+-   buffer "cbuff". */
++   buffer "cbuff".  Return value and mustWork as for translateToNative(). */
+ static int translateToUTF8(const char *ans, R_StringBuffer *cbuff,
+ 			     nttype_t ttype, int mustWork)
+ {
+@@ -2015,28 +2032,21 @@
+ 	const void *vmax = vmaxget();
+ 	const char *native_buf = reEnc(cbuff->data, CE_UTF8, CE_NATIVE, 2);
+ 
+-	/* copy to truncate */
++	/* Release the buffer before signalling: options(warn = 2) turns
++	   the warning into an error, and the unwind would leak it. */
+ 	char err_buff[256];
+-	if (strlen(native_buf) > 255) {
+-	    strncpy(err_buff, native_buf, 252);
+-	    err_buff[252] = '\0';
+-	    mbcsTruncateToValid(err_buff);
+-	    strcat(err_buff, "...");
+-	} else
+-	    strcpy(err_buff, native_buf);
+-
++	truncateForMessage(err_buff, native_buf);
++	vmaxset(vmax);
++	R_FreeStringBuffer(cbuff);
+ 	if (mustWork == 2) {
+ 	    warning(_("unable to translate '%s' to UTF-8"),
+ 		    err_buff);
+-	    vmaxset(vmax);
+ 	    return 1;
+ 	} else {
+-	    R_FreeStringBuffer(cbuff);
+ 	    error(_("unable to translate '%s' to UTF-8"), err_buff);
+ 	}
+-	vmaxset(vmax);
+     }
+-    return 0;
++    return failed;
+ }
+ 
+ /* This may return a R_alloc-ed result, so the caller has to manage the
+@@ -2078,11 +2088,9 @@
+     if (t == NT_NONE) return ans;
+ 
+     R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+-    if (translateToUTF8(ans, &cbuff, t, 2)) {
+-	R_FreeStringBuffer(&cbuff);
+-	return NULL;
+-    }  else
+-	return copyAndFreeStringBuffer(&cbuff);
++    if (translateToUTF8(ans, &cbuff, t, 2))
++	return NULL; /* buffer already released */
++    return copyAndFreeStringBuffer(&cbuff);
+ }
+ 
+ /* Decides type of translation needed to get wchar_t*. */
+@@ -2132,8 +2140,8 @@
+    NB: that wchar_t is UCS-4 is an assumption, but not easy to avoid.
+ */
+ 
+-/* This may return a R_alloc-ed result, so the caller has to manage the
+-   R_alloc stack */
++/* Translates string in "ans" to wchar_t returning it in string
++   buffer "cbuff".  Return value and mustWork as for translateToNative(). */
+ static int translateToWchar(const char *ans, R_StringBuffer *cbuff,
+                             nttype_t ttype, int mustWork)
+ {
+@@ -2210,29 +2218,22 @@
+ 				       (size_t) (outbuf - cbuff->data),
+ 				       TO_WCHAR, "", 2);
+ 
+-	/* copy to truncate (and mark as truncated) */
++	/* Release the buffer before signalling: options(warn = 2) turns
++	   the warning into an error, and the unwind would leak it. */
+ 	char err_buff[256];
+-	if (strlen(native_buf) > 255) {
+-	    strncpy(err_buff, native_buf, 252);
+-	    err_buff[252] = '\0';
+-	    mbcsTruncateToValid(err_buff);
+-	    strcat(err_buff, "...");
+-	} else
+-	    strcpy(err_buff, native_buf);
+-
++	truncateForMessage(err_buff, native_buf);
++	vmaxset(vmax);
++	R_FreeStringBuffer(cbuff);
+ 	if (mustWork == 2) {
+ 	    warning(_("unable to translate '%s' to a wide string"),
+ 	              err_buff);
+-	    vmaxset(vmax);
+ 	    return 1;
+ 	} else {
+-	    R_FreeStringBuffer(cbuff);
+ 	    error(_("unable to translate '%s' to a wide string"),
+ 	          err_buff);
+ 	}
+-	vmaxset(vmax);
+     }
+-    return 0;
++    return failed;
+ }
+ 
+ /* This may return a R_alloc-ed result, so the caller has to manage the
+@@ -2259,11 +2260,9 @@
+ 	return wfromASCII(CHAR(x), LENGTH(x));
+ 
+     R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
+-    if (translateToWchar(CHAR(x), &cbuff, t, 2)) {
+-	R_FreeStringBuffer(&cbuff);
+-	return NULL;
+-    } else
+-	return wcopyAndFreeStringBuffer(&cbuff);
++    if (translateToWchar(CHAR(x), &cbuff, t, 2))
++	return NULL; /* buffer already released */
++    return wcopyAndFreeStringBuffer(&cbuff);
+ }
+ 
+ static int reEncodeIconv(const char *x, size_t length, R_StringBuffer *cbuff,
