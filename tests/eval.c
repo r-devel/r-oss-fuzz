@@ -114,6 +114,15 @@ int main(int argc, char **argv)
         check(blocked[i], 1, 0);
     assert(!R_existsVarInFrame(R_GlobalEnv, Rf_install("x")));
 
+    /* Warnings are suppressed (options(warn = -1) in fuzz_init_r), never
+     * turned into errors: an error raised from inside C code would unwind
+     * past its allocations and show up as a leak.  options() is unbound, so
+     * the input cannot change that. */
+    check("is.na(as.integer('a'))", 0, 1);
+    check("is.na(2147483647L + 1L)", 0, 1);
+    check("length(1:3 + 1:2)", 0, 3);
+    check("f <- function() as.integer('a'); is.na(f())", 0, 1);
+
     check("if (", 1, 0);
     check("missing_name + 1", 1, 0);
     /* The 8Mb vector heap: a 4MB vector fits, a 16MB one is refused before
