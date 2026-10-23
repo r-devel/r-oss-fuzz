@@ -1,0 +1,60 @@
+Poll for interrupts from deparse's output buffer.
+
+deparse never checks for interrupts, and its output for a nested value
+grows quadratically with the depth: every line is indented two spaces
+per level, and print2buff measures the whole line again for each token
+it appends.  A list a hundred thousand levels deep, which an input can
+build in a loop within the eval target's budget, deparses for minutes;
+as.character() of a list or of a closure reaches it.  On the main
+thread's 8 MiB stack the recursion overflowed first, so this was hidden
+behind a stack-overflow crash until the harnesses moved R to a thread
+with a 1 GiB stack (harnesses/common.h).
+
+Poll every 1024 appends, through R_UnwindProtect so the line buffer,
+which deparse mallocs, is freed when the poll unwinds; a leak there
+would be reported as a crash.  R_CheckUserInterrupt also checks the C
+stack, so deparse recursion that does reach the thread's limit ends in
+R's "C stack usage" error rather than a sanitizer fault.
+
+Instrumentation, not a fix: R's deparse is only this slow on values no
+program builds, and this changes no result.  Without it the harness
+reports a timeout for such an input rather than a wrong answer.
+
+diff --git a/src/main/deparse.c b/src/main/deparse.c
+index bcc3641..0eb0ca5 100644
+--- a/src/main/deparse.c
++++ b/src/main/deparse.c
+@@ -1572,9 +1572,33 @@ static void writeline(LocalParseData *d)
+     d->startline = true;
+ }
+ 
++/* Fuzzing instrumentation: deparse never polls for interrupts, and its
++   output for a nested value is quadratic in the depth (two spaces of
++   indentation per level on every line, and the line measured again for
++   every token appended), so the fuzz harnesses' work budget cannot stop
++   it.  Poll every 1024 appends.  The poll may unwind, so the line buffer
++   is freed on the way out rather than leaked. */
++static SEXP deparse_poll(void *data)
++{
++    (void) data;
++    R_CheckUserInterrupt();
++    return R_NilValue;
++}
++
++static void deparse_poll_cleanup(void *data, Rboolean jump)
++{
++    if (jump)
++	R_FreeStringBuffer((R_StringBuffer *) data);
++}
++
+ static void print2buff(const char *strng, LocalParseData *d)
+ {
+     size_t tlen, bufflen;
++    static unsigned int appends = 0;
++
++    if ((++appends & 1023) == 0)
++	R_UnwindProtect(deparse_poll, NULL,
++			deparse_poll_cleanup, &(d->buffer), NULL);
+ 
+     if (d->startline) {
+ 	d->startline = false;

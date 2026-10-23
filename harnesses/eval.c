@@ -26,7 +26,7 @@
  * and one evaluation can do a whole vector's worth of work, so the vector
  * heap is what caps the work of any one evaluation.  Base R itself needs
  * about 1 MiB of it.  R ignores a maximum below its initial heap (64 MiB),
- * so LLVMFuzzerInitialize lowers R_VSIZE to match. */
+ * so fuzz_target_init lowers R_VSIZE to match. */
 #define FUZZ_R_MAX_VSIZE "8Mb"
 #include "common.h"
 
@@ -394,7 +394,7 @@ static void eval_run(const uint8_t *data, size_t size)
     eval_budget = 0;
 }
 
-int LLVMFuzzerInitialize(int *argc, char ***argv)
+int fuzz_target_init(int *argc, char ***argv)
 {
     (void)argc;
     (void)argv;
@@ -432,7 +432,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+int fuzz_target_run(const uint8_t *data, size_t size)
 {
     if (size == 0 || size > FUZZ_MAX_INPUT || memchr(data, '\0', size) ||
         !eval_valid_utf8(data, size))

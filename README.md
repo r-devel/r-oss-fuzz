@@ -89,6 +89,20 @@ so the sanitizers' own handlers stay in place and traps crash cleanly,
 suppress warnings, and wrap each call in `R_ToplevelExec` to catch R's
 longjmp-on-error).
 
+R runs on a dedicated thread with a 1 GiB stack rather than on the
+process's main thread. Several of R's recursive C walkers (`c(recursive =
+TRUE)`, `as.character()` of a list, and the coerce, duplicate and identical
+walkers) never call `R_CheckStack()`, so a list some tens of thousands deep
+overflows the 8 MiB main-thread stack; plain R reports "segfault from C
+stack overflow" and recovers, long-standing behaviour rather than a defect
+to report, but under ASAN it is a crash every target walking a nested
+value would keep finding. `common.h` defines the libFuzzer entry points
+and forwards them to the harness's `fuzz_target_init` / `fuzz_target_run`
+on that thread, with R's C stack check re-pointed at it. The one walker
+whose cost, not just its depth, grows with nesting is `deparse` (its
+output is quadratic in the depth), which `instrumentation/0005` makes
+poll so the `eval` target's budget can end it.
+
 Targets whose R entry point only takes a path (`load`, `zip`, `connections`)
 stage each input in one per-process scratch file under the temp directory
 (`fuzz_scratch_file` / `fuzz_write_scratch` in `common.h`) rather than
@@ -115,7 +129,10 @@ DNS-timeout hangs by accident.
 The build is convention-driven — there is no per-target wiring in
 `ossfuzz.sh`. To add a target named `<name>`:
 
-1. Add `harnesses/<name>.c` (include `"common.h"` for the shared R setup).
+1. Add `harnesses/<name>.c`: include `"common.h"` for the shared R setup
+   and define `fuzz_target_init` and `fuzz_target_run`, which take the
+   `LLVMFuzzerInitialize` / `LLVMFuzzerTestOneInput` signatures (the header
+   defines those two and runs the harness's functions on the R thread).
 2. Optionally add, all keyed on the same `<name>` stem:
    - `dictionaries/<name>.dict`
    - `options/<name>.options`
@@ -155,6 +172,7 @@ fixes above are in place. Each header says what it is for. Currently:
 | `0002-memory-fill-freed-node-payloads` | under `--enable-strict-barrier`, overwrite the payload of every small node the collector frees with a sentinel byte, so a read through a stale pointer that bypasses the checked accessors fails where it happens rather than seeing the old, plausible contents; R's node heap is its own allocator, invisible to ASAN |
 | `0003-memory-abort-on-freed-object-access` | the checked accessors `abort()` on a freed node instead of signalling an R error, which the harnesses would otherwise catch and discard like any rejected input |
 | `0004-sys-std-abort-on-fatal-error` | `R_Suicide()` aborts instead of exiting with status 2, so a fatal error gets a stack trace and deduplicates on it; the harnesses also set `_R_GC_FAIL_ON_ERROR_` so GC consistency failures take this path |
+| `0005-deparse-poll-for-interrupts` | `deparse` polls for interrupts every 1024 appends to its line buffer (freeing the buffer if the poll unwinds), so the `eval` target's budget can stop `as.character()` of a list nested tens of thousands deep, whose deparse is quadratic in the depth and otherwise runs for minutes; R itself never polls there |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.

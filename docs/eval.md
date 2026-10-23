@@ -72,7 +72,7 @@ swallow a budget error and leave the budget switched off. Compiling from the
 harness avoids all three and costs 1 to 5 ms per expression under ASAN.
 
 The compiler needs two things from the sandbox, both in
-`LLVMFuzzerInitialize`. It refuses an environment whose chain does not end
+`fuzz_target_init`. It refuses an environment whose chain does not end
 in a frame `topenv()` recognises, and it inlines base syntax and arithmetic
 only for names it finds in a frame it classifies as base, going by the
 frame's `name` attribute. The allowlist frame therefore carries the name of
@@ -105,7 +105,7 @@ begins, so every input sees the same R.
 | compilation | outside the budget; bounded by the parsed-tree limits | harness (`eval_compile`) |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
-| recursion | R's `expressions` limit and C stack check | R; an ordinary R error |
+| recursion | R's `expressions` limit and C stack check, against the R thread's 1 GiB stack | R; an ordinary R error |
 
 The execution budget is counted in work, not time. R calls
 `R_CheckUserInterrupt()` at a fixed interval of evaluations in the AST
@@ -147,11 +147,23 @@ second under ASAN.
 
 The budget cannot see C loops that never poll, which is why `:` is capped;
 nothing else in the allowlist builds a long vector without allocating it.
+The other way to spend unbounded time without polling is depth rather
+than length: `as.character()` of a list nested tens of thousands deep
+(built in a loop, well within the budget) deparses it, and deparse's
+output is quadratic in the depth, so plain R takes a minute at 24k levels
+and overflows its stack at 32k. `instrumentation/0005` adds a poll to
+deparse's buffer so the budget and the CPU backstop reach it.
 
 Unbounded recursion is left to R. `f <- function() f(); f()` hits the
 `expressions` limit (5000) long before the C stack under ASAN, where
 `R_CheckStack()` in `eval()` would otherwise catch it; both are plain R
-errors and both were checked against an ASAN build.
+errors and both were checked against an ASAN build. C recursion that R
+does not check -- `c(x, recursive = TRUE)` or `as.character(x)` over a
+list the input nested a hundred thousand deep in a loop -- is absorbed by
+the R thread's 1 GiB stack (`common.h`), which outlasts any nesting the
+budget lets an input build; on the 8 MiB main-thread stack those were
+the first crashes the fuzzer found, and ones plain R also reports as
+"segfault from C stack overflow".
 
 ## Reproducing a finding
 
