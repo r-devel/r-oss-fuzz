@@ -1,32 +1,67 @@
 /*
  * Evaluate R source in a fresh environment with selected primitives only.
  *
- * This is a restricted evaluator, NOT a security sandbox. Run it inside an
- * externally isolated worker (see scripts/run-eval.sh). The allowlist keeps
- * ordinary inputs away from I/O, native calls, namespace loading, reflection,
- * and process-global state. It cannot contain a bug in the interpreter.
+ * The parse target stops at R_ParseVector; this one runs what it parsed,
+ * which is where the interpreter core lives (eval.c, envir.c, subset.c,
+ * subassign.c, coerce.c, arithmetic.c).  Each input is evaluated in a new
+ * environment whose locked parent holds a small allowlist of primitives,
+ * so the input can define closures, build and index vectors, loop and
+ * branch, but cannot reach I/O, native calls, namespaces, reflection or
+ * process-global state.
+ *
+ * The allowlist is not a security sandbox -- it cannot contain a bug in
+ * the interpreter -- and does not need to be: the fuzzing host is
+ * disposable.  It exists so that fuzzing cycles go to the evaluator rather
+ * than the filesystem, and so that every finding is a crash reachable from
+ * ordinary R code.  That second property is what makes a report from this
+ * target unambiguous: nothing here needs .Internal, body<- or any other
+ * "you asked for it" entry point.
  */
 
-#define FUZZ_R_MAX_VSIZE "64Mb"
+/* 8 MiB, not common.h's 1 GiB: the budget below is counted in evaluations,
+ * and one evaluation can do a whole vector's worth of work, so the vector
+ * heap is what caps the work of any one evaluation.  Base R itself needs
+ * about 1 MiB of it.  R ignores a maximum below its initial heap (64 MiB),
+ * so LLVMFuzzerInitialize lowers R_VSIZE to match. */
+#define FUZZ_R_MAX_VSIZE "8Mb"
 #include "common.h"
+
+#include <time.h>
+#include <R_ext/eventloop.h>   /* R_PolledEvents */
 
 #define FUZZ_MAX_INPUT 8192
 #define FUZZ_MAX_DEPTH 64
 #define FUZZ_MAX_NODES 1024
 
+/* Interrupt checks one input may make before it is cut off.  eval() checks
+ * for interrupts once per 10 evaluations in a fuzzing build (patches/0054;
+ * stock R: once per 1000) and C loops that call R_CheckUserInterrupt add
+ * their own, so this is roughly 200k evaluations: well under a second even
+ * with sanitizers, and deterministic, which a wall-clock limit is not.
+ * See eval_poll_budget. */
+#define FUZZ_EVAL_BUDGET 20000
+
+/* CPU seconds an input may use before the next budget check cuts it off,
+ * whatever the budget says.  A backstop for vector-heavy loops, where the
+ * budget's unit of work is too coarse; see eval_poll_budget. */
+#define FUZZ_EVAL_CPU_LIMIT 1.0
+
 static SEXP eval_builtins;
-static SEXP eval_limit;
-static SEXP eval_unlimit;
+
+/* Remaining interrupt checks for the current input; 0 means no limit. */
+static long eval_budget;
+static clock_t eval_cpu_start;
 
 /* Only primitives: importing a base closure would also import its enclosing
  * namespace and the capabilities reachable through its implementation.
  * No class/attribute setters or reflection/metaprogramming APIs are exposed.
  * Closures created by the input inherit only the restricted environment.
+ * `:` is provided separately, through a length-capped wrapper (below).
  */
 static const char *const eval_primitives[] = {
     "{", "(", "if", "for", "while", "repeat", "break", "next",
     "function", "return", "<-", "=",
-    "+", "-", "*", "/", "^", "%%", "%/%", ":",
+    "+", "-", "*", "/", "^", "%%", "%/%",
     "==", "!=", "<", "<=", ">", ">=", "!", "&", "|", "&&", "||",
     "c", "list", "[", "[[", "$", "[<-", "[[<-", "$<-",
     "length", "is.null", "is.logical", "is.integer", "is.double",
@@ -36,10 +71,119 @@ static const char *const eval_primitives[] = {
     "sum", "prod", "min", "max", "any", "all", "invisible"
 };
 
+/*
+ * `:` is wrapped rather than imported.  A compact ALTREP sequence costs
+ * nothing to create whatever its length, and the reductions without an
+ * ALTREP shortcut (prod, or min/max/sum with two arguments) then walk
+ * 1e9 elements in C without an interrupt check: 8-18 s under ASAN, which
+ * the budget cannot see and ClusterFuzz would file as a timeout.  Nothing
+ * else in the allowlist builds a long vector without allocating it, and
+ * allocation is bounded by the vector heap.
+ *
+ * The wrapper's enclosure holds only what its definition and body name
+ * (`function` included: it is a primitive looked up like any other), so
+ * it adds no capability.  .Internal is bound there to raise the error,
+ * and nowhere the input can see.
+ */
+static const char *const eval_wrapper_primitives[] = {
+    "function", "{", "if", "&&", "==", ">=", "-", "length", "is.finite", "abs",
+    ".Internal"
+};
+
+static const char *const eval_colon_source =
+    "function(from, to) {\n"
+    "    if (length(from) == 1L && length(to) == 1L &&\n"
+    "        is.finite(from) && is.finite(to) && abs(to - from) >= 1e6)\n"
+    "        .Internal(stop(TRUE, \"sequence too long for the eval target\"))\n"
+    "    .colon(from, to)\n"
+    "}";
+
 typedef struct {
     const uint8_t *data;
     size_t size;
 } eval_input_t;
+
+/*
+ * Execution budget, counted in interrupt checks.
+ *
+ * R_CheckUserInterrupt() -> R_ProcessEvents() -> R_PolledEvents() is the
+ * hook R offers for event loops, and it is reached from the same places
+ * that honour setTimeLimit(): every 10th eval() of the AST interpreter
+ * (every 1000th in stock R; patches/0054 lowers it for fuzzing builds),
+ * the byte-code loop back-edges, and the long-running C loops that poll
+ * for interrupts.  Counting those calls instead of CPU time gives every
+ * input the same budget on every machine, so an input that is cut off
+ * under ASAN on a slow bot is cut off the same way in a local reproduction,
+ * and libFuzzer's coverage feedback stops depending on timing.
+ *
+ * Exactness is to within one check interval: eval()'s counter is static
+ * and carries over between inputs.
+ *
+ * The unit is an evaluation, and an evaluation can be `!x` over the whole
+ * heap: with a 64 MiB heap and a check every 1000 evaluations,
+ * `x <- !1:4e4; repeat !x` ran 15 s under ASAN before the budget was
+ * spent, and would have been filed as a timeout.  Three things bound that.
+ * The heap is small (8 MiB), which caps the work of any one evaluation.
+ * The check interval is short (patches/0054), which caps the number of
+ * evaluations between two checks.  And a CPU backstop ends the input at
+ * the first check after FUZZ_EVAL_CPU_LIMIT seconds, whatever the budget
+ * says.  The backstop is the one timing-dependent limit left, and it only
+ * decides whether a vector-heavy input completes or errors, never whether
+ * it crashes; it sits far below ClusterFuzz's timeout threshold so that
+ * difference stays out of the tracker.
+ *
+ * The error unwinds to R_tryEvalSilent like any other R error.  Raising it
+ * from inside R_ProcessEvents is what R_CheckTimeLimits does, so the
+ * interpreter is prepared for a longjmp at this point.  The budget is
+ * zero by the time either error is raised, which switches the check off,
+ * so nothing on the error path can re-enter it.
+ */
+static void eval_poll_budget(void)
+{
+    if (eval_budget <= 0)
+        return;
+
+    if (--eval_budget == 0)
+        Rf_error("evaluation budget exhausted");
+
+    if ((double)(clock() - eval_cpu_start) / CLOCKS_PER_SEC > FUZZ_EVAL_CPU_LIMIT) {
+        eval_budget = 0;
+        Rf_error("evaluation CPU limit exhausted");
+    }
+}
+
+/* The allowlist is only ever primitives (see eval_primitives): a name that
+ * stops being one would silently import a closure and its namespace. */
+static SEXP eval_primitive(const char *name)
+{
+    SEXP value = Rf_findFun(Rf_install(name), R_BaseEnv);
+    if (TYPEOF(value) != BUILTINSXP && TYPEOF(value) != SPECIALSXP) {
+        fprintf(stderr, "eval: %s is no longer a primitive\n", name);
+        abort();
+    }
+    return value;
+}
+
+static void eval_import_primitives(SEXP env, const char *const *names, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        Rf_defineVar(Rf_install(names[i]), eval_primitive(names[i]), env);
+}
+
+/* fuzz_make_wrapper, but closing over a chosen environment. */
+static SEXP fuzz_make_wrapper_in(const char *source, SEXP env)
+{
+    ParseStatus status;
+    SEXP text, parsed, wrapper;
+    Rf_protect(text = Rf_mkString(source));
+    Rf_protect(parsed = R_ParseVector(text, -1, &status, R_NilValue));
+    if (status != PARSE_OK || XLENGTH(parsed) != 1)
+        abort();
+
+    wrapper = Rf_eval(VECTOR_ELT(parsed, 0), env);
+    Rf_unprotect(2);
+    return wrapper;
+}
 
 static int eval_valid_utf8(const uint8_t *data, size_t size)
 {
@@ -124,15 +268,17 @@ static SEXP eval_source(const eval_input_t *input, int *error)
         return R_NilValue;
     }
 
+    /* One budget covers all top-level expressions of an input. */
     Rf_protect(env = R_NewEnv(eval_builtins, TRUE, 29));
-    R_tryEvalSilent(eval_limit, R_BaseEnv, error);
-    if (!*error) {
-        for (R_xlen_t i = 0; i < XLENGTH(parsed); i++) {
-            result = R_tryEvalSilent(VECTOR_ELT(parsed, i), env, error);
-            if (*error)
-                break;
-        }
+    eval_cpu_start = clock();
+    eval_budget = FUZZ_EVAL_BUDGET;
+    for (R_xlen_t i = 0; i < XLENGTH(parsed); i++) {
+        result = R_tryEvalSilent(VECTOR_ELT(parsed, i), env, error);
+        if (*error)
+            break;
     }
+    eval_budget = 0;
+
     Rf_unprotect(3);
     return *error ? R_NilValue : result;
 }
@@ -141,15 +287,6 @@ static void eval_one(void *data)
 {
     int error = 0;
     eval_source((const eval_input_t *)data, &error);
-}
-
-static void eval_reset_limit(void *data)
-{
-    (void)data;
-    int error = 0;
-    R_tryEvalSilent(eval_unlimit, R_BaseEnv, &error);
-    if (error)
-        abort();
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
@@ -161,35 +298,27 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
      */
     setenv("R_ENABLE_JIT", "0", 1);
     setenv("R_DEFAULT_PACKAGES", "NULL", 1);
+    if (getenv("R_VSIZE") == NULL)
+        setenv("R_VSIZE", FUZZ_R_MAX_VSIZE, 1);
     fuzz_init_r();
 
     Rf_protect(eval_builtins = R_NewEnv(R_EmptyEnv, TRUE, 97));
-    for (size_t i = 0; i < sizeof(eval_primitives) / sizeof(*eval_primitives); i++) {
-        SEXP name = Rf_install(eval_primitives[i]);
-        SEXP value = Rf_findFun(name, R_BaseEnv);
-        if (TYPEOF(value) != BUILTINSXP && TYPEOF(value) != SPECIALSXP) {
-            fprintf(stderr, "eval: %s is no longer a primitive\n", eval_primitives[i]);
-            abort();
-        }
-        Rf_defineVar(name, value, eval_builtins);
-    }
+    eval_import_primitives(eval_builtins, eval_primitives,
+                           sizeof(eval_primitives) / sizeof(*eval_primitives));
+
+    SEXP private_env, colon;
+    Rf_protect(private_env = R_NewEnv(R_EmptyEnv, TRUE, 29));
+    eval_import_primitives(private_env, eval_wrapper_primitives,
+                           sizeof(eval_wrapper_primitives) / sizeof(*eval_wrapper_primitives));
+    Rf_defineVar(Rf_install(".colon"), eval_primitive(":"), private_env);
+    R_LockEnvironment(private_env, TRUE);
+    Rf_protect(colon = fuzz_make_wrapper_in(eval_colon_source, private_env));
+    Rf_defineVar(Rf_install(":"), colon, eval_builtins);
+    Rf_unprotect(2);
+
     R_LockEnvironment(eval_builtins, TRUE);
 
-    /* Trusted calls, inaccessible to the input. Limits are cooperative R
-     * interrupt checks; the worker still needs an external hard deadline.
-     * A single budget covers all top-level expressions in an input.
-     */
-    SEXP limit_fun, cpu, elapsed, transient, infinity;
-    Rf_protect(limit_fun = Rf_findFun(Rf_install("setTimeLimit"), R_BaseEnv));
-    Rf_protect(cpu = Rf_ScalarReal(0.05));
-    Rf_protect(elapsed = Rf_ScalarReal(0.1));
-    Rf_protect(transient = Rf_ScalarLogical(TRUE));
-    Rf_protect(infinity = Rf_ScalarReal(R_PosInf));
-    eval_limit = Rf_lang4(limit_fun, cpu, elapsed, transient);
-    R_PreserveObject(eval_limit);
-    eval_unlimit = Rf_lang4(limit_fun, infinity, infinity, transient);
-    R_PreserveObject(eval_unlimit);
-    Rf_unprotect(5);
+    R_PolledEvents = eval_poll_budget;
     return 0;
 }
 
@@ -201,8 +330,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     eval_input_t input = { data, size };
     R_ToplevelExec(eval_one, &input);
-    /* Run even after a longjmp; a timed-out input must not poison the next. */
-    if (!R_ToplevelExec(eval_reset_limit, NULL))
-        abort();
+    /* A jump past eval_source (an interrupt, not an error) skips its reset. */
+    eval_budget = 0;
     return 0;
 }

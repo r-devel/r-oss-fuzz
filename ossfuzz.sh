@@ -60,7 +60,9 @@ else
     ####################################################################
     # patches/ carries fixes that have not landed in R yet, applied in
     # filename order (hence the numeric prefixes -- one patch may depend
-    # on an earlier one).
+    # on an earlier one).  One exception is a fuzzing-mode adjustment
+    # rather than a fix (0054, the interrupt-check interval the eval
+    # target's budget relies on); its header says so.
     #
     # These are not cosmetic.  Fuzzing an R with a known crash is worse
     # than it sounds: libFuzzer replays the entire stored corpus at
@@ -294,20 +296,17 @@ mkdir -p "$SEED_STAGE/unserialize"
 # target is just deleting its name here.  rd waits on two R bugs its first
 # runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
 # (reached through \encoding{}) and parse_Rd() never returning on an
-# unterminated \Sexpr.  ClusterFuzzLite is not so constrained (findings stay
-# within this repository's CI), so .clusterfuzzlite/build.sh clears the list
-# and keeps fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
+# unterminated \Sexpr.  eval is held back only for its first cycle: it is
+# the one target that runs its input rather than parsing it, and until a
+# batch run on real bots has shown its timeout and memory profile to be
+# quiet, a flood of low-value timeout reports is the risk (docs/eval.md).
+# ClusterFuzzLite is not so constrained (findings stay within this
+# repository's CI), so .clusterfuzzlite/build.sh clears the list and keeps
+# fuzzing everything.
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd eval}"
 
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
-
-    # Evaluation needs a separately isolated local runner and is experimental.
-    # Keep it opt-in even when ClusterFuzzLite clears DEFERRED_TARGETS.
-    if [ "$name" = eval ] && [ "${ENABLE_EVAL_FUZZER:-0}" != 1 ]; then
-        echo "ossfuzz.sh: target eval: experimental -- set ENABLE_EVAL_FUZZER=1"
-        continue
-    fi
 
     case " $DEFERRED_TARGETS " in
         *" $name "*)

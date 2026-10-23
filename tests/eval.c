@@ -17,6 +17,8 @@ static void check_source(void *data)
     Rf_protect(result = eval_source(&input, &error));
     if (!!error != check->expect_error) {
         fprintf(stderr, "unexpected error=%d for: %s\n", error, check->source);
+        if (error)
+            fprintf(stderr, "R said: %s", R_curErrorBuf());
         abort();
     }
     if (!error) {
@@ -34,7 +36,8 @@ static void check(const char *source, int expect_error, double expected)
         fprintf(stderr, "unexpected top-level error for: %s\n", source);
         abort();
     }
-    assert(R_ToplevelExec(eval_reset_limit, NULL));
+    /* Every path out of an input must leave the budget switched off. */
+    assert(eval_budget == 0);
 }
 
 int main(int argc, char **argv)
@@ -73,14 +76,48 @@ int main(int argc, char **argv)
 
     check("if (", 1, 0);
     check("missing_name + 1", 1, 0);
-    /* Exceeds the harness's 64Mb vector heap, before allocating the vector. */
+    /* The 8Mb vector heap: a 4MB vector fits, a 16MB one is refused before
+     * allocation, both as ordinary R errors. */
+    check("x <- 1; x[500000] <- 1; length(x)", 0, 500000);
+    check("x <- 1; x[2000000] <- 1", 1, 0);
     check("x <- 1; x[100000000] <- 1", 1, 0);
+
+    /* Runaway inputs: an infinite loop is stopped by the evaluation budget,
+     * unbounded recursion by R's expression or C stack limit -- all as R
+     * errors, and the next input is unaffected.  Repeated, because the
+     * budget and the stack checks must recover as well as fire. */
     for (int i = 0; i < 3; i++) {
         check("repeat {}", 1, 0);
+        check("i <- 0; while (TRUE) i <- i + 1", 1, 0);
+        /* The fuzzer's own find: one evaluation per heap-sized vector op,
+         * which the small heap and the CPU backstop keep to seconds. */
+        check("x <- !1:40000; repeat !x", 1, 0);
+        check("x <- !1:999999; repeat !x", 1, 0);
         check("f <- function() f(); f()", 1, 0);
+        check("f <- function(n) if (n > 0) f(n - 1) else 0; f(100000)", 1, 0);
         check("40 + 2", 0, 42);
         R_gc();
     }
+
+    /* The budget bounds work, not time: a loop that fits runs to the end,
+     * and the same input gives the same answer every time. */
+    for (int i = 0; i < 3; i++)
+        check("x <- 0; for (i in 1:20000) x <- x + 1; x", 0, 20000);
+
+    /* `:` is a length-capped wrapper: long compact sequences are refused
+     * before a reduction can walk them, short ones behave as usual, and
+     * the wrapper's private environment stays out of reach. */
+    check("length(1:1000000)", 0, 1000000);
+    check("1:1000001", 1, 0);
+    check("prod(1:1000000000)", 1, 0);
+    check("max(1:1000000000, 1L)", 1, 0);
+    check("(3:1)[1]", 0, 3);
+    check("f <- `:`; f(2, 4)[2]", 0, 3);
+    check("`:`(1, 3)[3]", 0, 3);
+    check("1:NA", 1, 0);
+    check("1:'a'", 1, 0);
+    check(".colon(1, 2)", 1, 0);
+    check(".Internal(stop(TRUE, 'x'))", 1, 0);
 
     /* Construct the tree directly: older R parsers can fail on deep syntax
      * before our post-parse guard is reached. This check is for the guard.

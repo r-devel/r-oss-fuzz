@@ -1,86 +1,181 @@
-# Experimental evaluation target
+# The `eval` target
 
-`eval` parses UTF-8 R source and evaluates the expressions in order. It covers
-interpreted evaluation, lazy arguments, closures and lexical scoping, control
-flow, vector operations, and indexing/replacement. It discards results without
-printing them. Ordinary R errors terminate that input; sanitizer failures still
-terminate the process normally.
+`eval` parses UTF-8 R source and evaluates the expressions in order, in a
+fresh environment whose locked parent holds a small allowlist of primitives.
+Where `parse` stops at `R_ParseVector`, this target runs what was parsed: the
+AST interpreter (`eval.c`), environments and promises (`envir.c`), closures
+and argument matching, `[`/`[[`/`$` and their replacement forms (`subset.c`,
+`subassign.c`), arithmetic and comparison (`arithmetic.c`, `relop.c`,
+`logic.c`), coercion (`coerce.c`) and the `c()`/`list()` builders. Results are
+discarded without printing. An ordinary R error ends that input; sanitizer
+reports still terminate the process as usual.
 
-The target is **opt-in**. Set `ENABLE_EVAL_FUZZER=1` when running `ossfuzz.sh`
-or pass it into the OSS-Fuzz builder:
+## What the input can do
+
+The parent environment contains exactly the primitives listed in
+`eval_primitives` in [`harnesses/eval.c`](../harnesses/eval.c): control flow
+and `function`, assignment with `<-` and `=`, arithmetic, comparison and
+logical operators, `c`, `list`, the three subsetting operators and their
+replacement forms, the `is.*`/`as.*` predicates and coercions, a few
+elementwise maths functions, `sum`/`prod`/`min`/`max`/`any`/`all`, and
+`invisible`. Its parent is `emptyenv()`. The harness checks at start-up that
+every imported binding really is a primitive, because importing a base
+closure would also import the base namespace it closes over, and everything
+reachable from there.
+
+`:` is the one exception: it is a closure, not the primitive. A compact
+ALTREP sequence costs nothing to create at any length, and the reductions
+without an ALTREP shortcut (`prod`, or `min`/`max`/`sum` with two arguments)
+then walk a billion elements in C with no interrupt check: 8 to 18 seconds
+under ASAN, invisible to the budget below and a certain timeout report. The
+wrapper refuses sequences of a million elements or more and otherwise calls
+the primitive. Its enclosure is a private environment holding only what its
+body names, so it adds no capability.
+
+There are no bindings for filesystem, network or process access, `.Internal`,
+`.Call` and friends, namespace or package loading, `eval`/`quote`/`substitute`,
+environment accessors or `<<-`, attribute and class setters, S3/S4 dispatch,
+`options`, or time limits. These are capability restrictions, not a denylist
+over the source text: `base::system` fails because `::` is unbound. Closures
+the input defines inherit the restricted environment, and primitive names can
+be shadowed only in the input's own environment, which the next input never
+sees. JIT compilation and default packages are disabled at initialization,
+so what runs is the AST interpreter, and nothing is attached that could leak
+through a method lookup.
+
+The allowlist is not a security sandbox and cannot contain a bug in the
+interpreter; the fuzzing host is disposable, so it does not need to. It
+exists for two other reasons. Fuzzing cycles go to the evaluator instead of
+to the filesystem and process table. And every finding is reachable from
+ordinary R code: nothing here needs `.Internal`, `body<-`, `environment<-`
+or any other entry point that R-core treats as "you asked for it", which is
+what makes a report from this target unambiguous.
+
+## Limits
+
+| Limit | Value | Enforced by |
+|-------|-------|-------------|
+| input size | 8 KiB, valid UTF-8, no embedded NUL | harness, before parsing |
+| parsed tree | depth 64, 1024 nodes | post-parse walk (`eval_tree_within_budget`) |
+| vector heap | 8 MiB (`R_VSIZE` and `R_MAX_VSIZE`) | R's allocator; an ordinary R error |
+| execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
+| execution, backstop | 1 CPU second, checked at the same points | the same hook |
+| recursion | R's `expressions` limit and C stack check | R; an ordinary R error |
+
+The execution budget is counted in work, not time. R calls
+`R_CheckUserInterrupt()` at a fixed interval of evaluations in the AST
+interpreter, at byte-code loop back-edges, and from the long-running C loops
+that poll for interrupts; each call reaches `R_PolledEvents()`, which the
+harness points at a counter. That is the same path `setTimeLimit()` is
+checked on, so the error unwinds exactly as a time limit would, but the
+budget is the same on every machine: an input cut off on a slow bot under
+ASAN is cut off at the same point in a local reproduction, and libFuzzer's
+coverage signal does not depend on timing. The counter in `eval()` is static
+and carries over between inputs, so the budget is exact to within one check
+interval. Under ASAN, `repeat {}` is stopped in about 40 ms; a
+20000-iteration counting loop completes.
+
+The unit of that budget is an evaluation, and one evaluation can be a
+vector operation over the whole heap. The first local fuzz run found
+exactly that: `x <- !1:4E4; repeat !x` ran for 15 seconds, well past
+ClusterFuzz's timeout threshold, with the budget none the wiser. Three
+things bound it now.
+
+- **The heap is 8 MiB**, which caps the work of any one evaluation. Base R
+  needs about 1 MiB of it. R silently ignores an `R_MAX_VSIZE` below its
+  64 MiB initial heap, so the harness lowers `R_VSIZE` as well.
+- **The check interval is short.** Stock R polls once per 1000
+  evaluations, so a thousand heap-sized operations fit between two checks.
+  [`patches/0054`](../patches/0054-eval-poll-for-interrupts-more-often-in-fuzzing-builds.patch)
+  makes fuzzing builds (`FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`, which
+  every OSS-Fuzz build defines) poll every 10 evaluations and every 128
+  byte-code instructions. That is the one carried patch that is an
+  adjustment rather than a fix; it stays for as long as this target needs
+  it, and the harness still works without it, only slower to cut inputs
+  off.
+- **A CPU backstop** ends the input at the first check after one CPU
+  second, whatever the budget says. It is the only timing-dependent limit
+  left. It decides whether a vector-heavy input completes or errors, never
+  whether it crashes, and it sits far enough below the timeout threshold
+  that bot speed cannot turn the difference into a report.
+
+With all three, the worst inputs found so far (`repeat !x` over a 4 MB
+vector, `repeat as.character(x)` over 100k doubles) end in under half a
+second under ASAN.
+
+The budget cannot see C loops that never poll, which is why `:` is capped;
+nothing else in the allowlist builds a long vector without allocating it.
+
+Unbounded recursion is left to R. `f <- function() f(); f()` hits the
+`expressions` limit (5000) long before the C stack under ASAN, where
+`R_CheckStack()` in `eval()` would otherwise catch it; both are plain R
+errors and both were checked against an ASAN build.
+
+## Reproducing a finding
+
+Every function the input can call is a base primitive, so the restricted
+environment is not needed to reproduce a crash: run the testcase with
 
 ```sh
-python3 infra/helper.py build_fuzzers -e ENABLE_EVAL_FUZZER=1 r
+R_VSIZE=8Mb R_MAX_VSIZE=8Mb Rscript --vanilla testcase.R
 ```
 
-As with other targets, the builder must use the checkout containing this change.
-The dictionary, options, and eight seeds are packaged by the existing build loop.
-ClusterFuzzLite clearing `DEFERRED_TARGETS` does not enable this target.
+If it crashes plain R, that is the report. A testcase that only errors
+outside the harness was relying on the budget or the heap cap, which the
+exported variable and a `setTimeLimit()` call can stand in for. The
+interrupt-check budget has no user-level equivalent, but an input that
+needs it to crash would be a budget bug, not an R bug.
 
-## Restrictions and limits
+## What is deliberately left out, and what comes next
 
-Each input gets a new environment. Its parent is a locked environment containing
-only the primitives listed in `harnesses/eval.c`, with `emptyenv()` as its parent.
-The harness verifies that every imported binding really is a primitive; importing
-a base closure would also import its enclosing namespace. Input-created closures
-inherit the restricted environment. Primitive names can be shadowed locally,
-but the parent bindings are locked and the next input gets a fresh environment.
+The current allowlist exercises the evaluator core and not much else. The
+findings of the earlier AFL++ evaluation harness in `kevinushey/r-afl` are
+instructive here: all eight of its bugs (`besselI(1, Inf)`,
+`intToUtf8(-1L)`, `as.POSIXlt(-1e19)`, `all(quote(x))`, `x[1e300]`,
+`file.choose(sum)`, and two more float-to-integer casts) came from handing
+unusual argument types and magnitudes to C entry points, not from the
+interpreter proper. Of those, only the subscript overflow is reachable
+through this allowlist. The value of an evaluation target is argument-space
+coverage of builtins that the string-driven targets cannot provide, so the
+allowlist should widen once this target has run quietly:
 
-There are no bindings for filesystem/network access, shell execution, native
-calls, namespace/package loading, environment reflection, `eval`, `quote`,
-attribute/class setters, `<<-`, global options, or time-limit controls. These are
-capability restrictions, not a blacklist applied to source text. For example,
-`base::system` fails because `::` is unavailable. User-defined functions work.
-JIT compilation and default package attachment are disabled at initialization.
+1. **Inert language objects and attributes**: `quote`, `substitute`,
+   `missing`, `nargs`, `switch`, `rep`, `seq_len`, `seq_along`, `names<-`,
+   `dim<-`, `attr`, `attr<-`, `class<-`, `oldClass<-`, `unclass`,
+   `attributes<-`, `levels<-`, `UseMethod`, `on.exit`. Language objects are
+   inert without `eval`, and attributes plus `UseMethod` open up S3
+   dispatch, where a good share of historical interpreter crashes live.
+   `all(quote(x))` is in this tier.
+2. **Every remaining computational primitive**: the full `names.c` table
+   minus the capability set (`.Internal`, `.External*`, `.Call`, `.C`,
+   `.Fortran`, `.Primitive`, `environment<-`, `as.environment`, `baseenv`,
+   `globalenv`, `emptyenv`, `pos.to.env`, `lazyLoadDBfetch`, `browser`,
+   `tracemem` and friends, `proc.time`, `gc.time`, `interactive`,
+   `standardGeneric`). `is.*`, `log`/`exp`/trig/gamma, `cumsum`, `range`,
+   complex accessors, `%*%`, `xtfrm`, `anyNA`, `as.call`, `call`.
+3. **Pure base closures over `.Internal`**, imported one at a time behind
+   a wrapper whose enclosure is a private environment (the `:` pattern), so
+   the namespace is never reachable: `besselI`, `intToUtf8`, `utf8ToInt`,
+   `strtoi`, `chartr`, `nchar`, `substr`, `rev`, `sort`, `order`, `paste`,
+   `format`, `as.POSIXlt`, `Sys.time` is not one of them. Each of these
+   has a string-driven target already; what eval adds is numeric and
+   type-confused arguments.
 
-Inputs are limited to 8 KiB; malformed UTF-8 and embedded NULs are rejected. A
-post-parse tree walk has depth and node budgets of 64 and 1024. R's parser can
-reject deeply nested input before that walk. R's vector heap defaults to 64 MiB.
-A cooperative CPU limit of 50 ms and elapsed limit of 100 ms covers each input,
-the harness clears the limit after both success and error. These checks depend
-on R interrupt points and cannot stop arbitrary native code. The fuzzer options
-also specify a five-second timeout and a 1024 MiB RSS limit.
+A denylist over all of base, which is what r-afl did and what PHP's
+`execute` fuzzer does, is not the plan: R has first-class environments, so
+any closure imported from base hands the input `environment(f)` and the
+whole namespace unless reflection is also denied, and that list never
+closes. PHP can get away with a `disable_functions` list because its
+function table is flat.
 
-This does not reset the whole R runtime. Interned symbols and other internal
-state can survive, and the vector cap does not bound every native allocation.
-Periodically restart workers. This target deliberately excludes base closures,
-packages, S3/S4 class construction, reflection, and bytecode/JIT coverage.
+Prior art the design follows: QuickJS's `fuzz_eval` bounds the script with
+an interrupt-handler counter (100 calls), a 64 MB memory limit and a fresh
+runtime per input; PHP's `execute` fuzzer counts opcodes (1000 per run) and
+caps inputs at 8 KiB; SQLite's `ossfuzz.c` uses a progress-handler step
+limit. CPython's targets compile but never execute, so there is no Python
+evaluator fuzzer to compare with. None of them use wall-clock limits.
 
-## Local isolation
-
-The R restrictions are **not a security sandbox** and cannot contain interpreter
-memory corruption. OSS-Fuzz's local helper currently starts privileged Docker
-containers, so use the separate launcher for evaluation:
-
-```sh
-scripts/run-eval.sh /absolute/path/to/oss-fuzz/build/out/r /absolute/path/to/eval-state
-```
-
-Run as an unprivileged host user. The launcher starts the target directly in
-the base-runner image, without its normal entrypoint. It uses a read-only root
-filesystem and `/out`, no network, no capabilities, `no-new-privileges`, Docker's
-default syscall restrictions, a non-root UID, 2 GiB memory, one CPU, 64 processes,
-and a 256 MiB temporary filesystem. GNU `timeout` supervises the worker with a
-60-second wall-clock deadline; the fuzzer normally finishes five seconds earlier.
-`EVAL_SECONDS` selects a deadline from 10 to 3600 seconds. The launcher retains
-Docker's default seccomp policy; do not disable it to work around a runtime error.
-
-Only the dedicated state directory is mounted writable, for `corpus/` and
-`artifacts/`. Copy the supplied seed files into `eval-state/corpus/` before the
-first run. That directory is intentionally accessible to the evaluated process:
-keep unrelated files out of it, and use a filesystem quota if disk growth needs
-a hard limit. The memory limit and temporary-filesystem limit do not cap this
-bind mount. Docker image pulls happen on the host before the isolated run.
-
-`EVAL_RUNNER_IMAGE` can select a compatible image (or pinned digest) containing
-`/usr/bin/timeout` and R's runtime dependencies. It must match the target's CPU
-architecture; use `DOCKER_DEFAULT_PLATFORM` when appropriate. Only R built with
-coverage instrumentation provides useful feedback from inside R; instrumenting
-the harness alone is a smoke test. Containers share the Docker host's kernel;
-use a dedicated VM for stronger isolation. Review the actual hosted job settings
-before enabling this target in continuous OSS-Fuzz runs.
-
-## Behavioral checks
+## Behavioural checks
 
 ```sh
 scripts/check-eval.sh
@@ -88,9 +183,13 @@ scripts/check-eval.sh
 R_BIN=Rdevel CC=clang CFLAGS='-fsanitize=address,undefined' scripts/check-eval.sh
 ```
 
-The standalone checks exercise closure results, lazy promises, lexical capture,
-indexing, copy-on-modify, and loops; verify denied capabilities and per-input
-state isolation; and check recovery after syntax errors, allocation limits,
-recursion errors, and repeated timeouts. They use fixed, harmless inputs.
-The default R vector limit is forced for these checks. Run them without
-`-DNDEBUG`, since they use assertions.
+[`tests/eval.c`](../tests/eval.c) includes the harness and checks results
+of closures, promises, lexical capture, indexing, copy-on-modify and loops;
+that capability probes fail and nothing survives an input; recovery after
+syntax errors, the heap cap, unbounded recursion, the budget and the
+vector-heavy loops above (three rounds each); that a loop within budget
+runs to completion with the same answer every time; and the `:` cap,
+including that its private environment is unreachable. They use fixed,
+harmless inputs, force the 8 MiB heap, and need to be built without
+`-DNDEBUG`. Against a stock R the budget checks still pass, just more
+slowly, since the CPU backstop takes over from the poll interval.

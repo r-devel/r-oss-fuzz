@@ -1,4 +1,4 @@
+# The harness rejects inputs over 8 KiB (FUZZ_MAX_INPUT in harnesses/eval.c);
+# tell libFuzzer so it does not spend mutations on inputs that will be skipped.
 [libfuzzer]
 max_len = 8192
-timeout = 5
-rss_limit_mb = 1024

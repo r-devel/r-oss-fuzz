@@ -16,6 +16,6 @@ ${CC:-cc} ${CFLAGS:-} -std=gnu11 -Wall -Wextra -Wno-unused-function \
     $("$eval_r" CMD config --ldflags) ${LDFLAGS:-} \
     -o "$eval_build/check-eval"
 
-R_HOME="$eval_r_home" R_MAX_VSIZE=64Mb \
+R_HOME="$eval_r_home" R_VSIZE=8Mb R_MAX_VSIZE=8Mb \
     LD_LIBRARY_PATH="$eval_r_home/lib:${LD_LIBRARY_PATH:-}" \
     "$eval_build/check-eval"

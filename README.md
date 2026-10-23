@@ -24,6 +24,9 @@ dictionaries/     <name>.dict   (libFuzzer dictionaries)
 options/          <name>.options (libFuzzer per-target options)
 seeds/<name>/     static seed corpus files for that target
 ossfuzz.sh        the build script OSS-Fuzz runs
+docs/             notes for a target that needs more than its header comment
+tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c,
+                  built and run by scripts/check-eval.sh against a local R)
 .clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
 docker/base/      base image holding a prebuilt, instrumented R
 ```
@@ -40,6 +43,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
 | `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
 | `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
+| `eval` \*      | interpreted evaluation of R source over an allowlist of primitives — closures, promises, scoping, control flow, vector indexing and arithmetic (`eval.c`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
 | `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
@@ -72,6 +76,11 @@ deferred.
 have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
 through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
 `\Sexpr`.
+`eval` is held back for a different reason again: it is the one target that
+runs its input rather than parsing it, so until a batch run on real bots has
+shown its timeout and memory profile to be quiet it stays out of the public
+tracker. A first quiet run is all it waits for; [`docs/eval.md`](./docs/eval.md)
+explains its execution budget and what it does and does not let the input do.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
@@ -203,7 +212,9 @@ the base image) and `R_PREBUILT` (skip the R build, use an existing install —
 used by [`.clusterfuzzlite/build.sh`](./.clusterfuzzlite/build.sh)).
 
 Two more exist for the checks on `patches/`, which carries fixes that have not
-landed in R yet: `R_PATCH_ONLY` stops after applying the patches, and
+landed in R yet (plus one fuzzing-mode adjustment, the interrupt-check
+interval the `eval` target's budget relies on; its header and
+[`docs/eval.md`](./docs/eval.md) explain): `R_PATCH_ONLY` stops after applying the patches, and
 `R_PATCH_STRICT` turns a patch that does not apply (or has already landed)
 into a failure rather than a log line. `patches-apply.yml` uses both on every
 pull request touching `patches/` and once a day, since trunk moves daily and a
