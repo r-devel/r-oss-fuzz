@@ -104,6 +104,15 @@ export the same value first — R is otherwise uncapped on Linux, and any
 behaviour that depends on the "vector memory limit reached" error path
 will not reproduce without it.
 
+The R bundled into the fuzzer output has no `internet` module
+(`ossfuzz.sh` deletes `modules/internet.so` after staging `R_HOME`).
+Every network entry point -- `url()`, `download.file()`,
+`socketConnection()`, `curlGetHeaders()`, the internal HTTP server --
+loads that module on first use, so all of them fail with an ordinary R
+error in the fuzzers. No target calls them today; this makes sure a wider
+allowlist or a new target cannot start generating outbound traffic or
+DNS-timeout hangs by accident.
+
 ## Adding or updating a target
 
 The build is convention-driven — there is no per-target wiring in

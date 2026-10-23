@@ -222,6 +222,14 @@ fi
 rm -rf "$OUT/r-install"
 cp -a "$R_PREFIX" "$OUT/r-install"
 
+# No target should reach the network, and a fuzzer that did would produce
+# nondeterministic coverage, DNS-timeout "hangs" and outbound traffic to
+# arbitrary hosts.  Every network entry point (url(), download.file(),
+# socketConnection(), curlGetHeaders(), the internal HTTP server) lives in
+# the loadable internet module, so dropping it from the bundled R_HOME turns
+# all of them into an ordinary R error ("unable to load shared object").
+rm -f "$OUT/r-install/lib/R/modules/internet.so"
+
 ########################################################################
 # 2. Stage seed corpora
 ########################################################################
