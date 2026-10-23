@@ -1,14 +1,19 @@
-Close the zip handle when unzip() raises an R error while extracting,
-so the zip target does not accumulate leaked handles and file
+Close the zip handle when unzip() raises an R error while extracting or
+listing, so the zip target does not accumulate leaked handles and file
 descriptors.
 
-zipunzip() (src/main/dounzip.c) opens the archive with unzOpen64() and
-closes it only on its normal return.  extract_one() raises an R error
-when an output file cannot be opened ("cannot open file '...': File
-name too long" for an entry name over the file system's component
-limit, a read-only exdir, ...), which unwinds past that unzClose() and
-leaks the unz64_s handle together with its open FILE: every failed
-call costs the process a file descriptor.
+zipunzip() and ziplist() (src/main/dounzip.c) open the archive with
+unzOpen64() and close it only on their normal return (ziplist() also by
+hand before its own explicit errors).  Any other R error raised in
+between unwinds past that unzClose() and leaks the unz64_s handle
+together with its open FILE: every failed call costs the process a file
+descriptor.  extract_one() errors when an output file cannot be opened
+("cannot open file '...': File name too long" for an entry name over
+the file system's component limit, a read-only exdir, ...); ziplist()
+hands the entry count read from a corrupt zip64 end-of-central-directory
+record to allocVector(), which rejects it ("negative length vectors are
+not allowed" after the (int) cast, or an allocation that cannot
+succeed).
 
     ==254==ERROR: LeakSanitizer: detected memory leaks
     Direct leak of 248 byte(s) in 1 object(s) allocated from:
@@ -18,24 +23,35 @@ call costs the process a file descriptor.
         #3 zipunzip        src/main/dounzip.c:253
         #4 Runzip          src/main/dounzip.c:410
 
-Register the close with a CTXT_CCODE context so the unwind runs
-unzClose(), as connections.c does for connections it opens.  unz_open()
-has the same shape around its "cannot locate file" warning, which is an
-error under options(warn = 2); it now closes the handle before warning.
+    Direct leak of 248 byte(s) in 1 object(s) allocated from:
+        #0 malloc
+        #1 unzOpenInternal src/main/dounzip.c:1232
+        #2 unzOpen64       src/main/dounzip.c:1251
+        #3 ziplist         src/main/dounzip.c:318
+        #4 Runzip          src/main/dounzip.c:411
 
-Found by OSS-Fuzz (libFuzzer_r_zip, testcase 6726887658029056: an
-archive with a 304-byte entry name extracted with junkpaths = TRUE).
-Reproduced locally with the zip harness and on R 4.6.1, where the
-descriptor count grows by one per failed call; both are fixed by this
-patch.
+Register the close with a CTXT_CCODE context in both functions so the
+unwind runs unzClose(), as connections.c does for connections it opens;
+the manual closes in ziplist() become redundant and are dropped.
+unz_open() has the same shape around its "cannot locate file" warning,
+which is an error under options(warn = 2); it now closes the handle
+before warning.
+
+Found by OSS-Fuzz (libFuzzer_r_zip): testcase 6726887658029056, an
+archive with a 304-byte entry name extracted with junkpaths = TRUE, and
+testcase 6127770850361344, a zip64 record claiming 0xff000001 entries
+passed to unzip(list = TRUE).  Reproduced locally on an unpatched trunk
+build and on R 4.6.1, where the descriptor count grows by one per
+failed call of either kind; both are fixed by this patch.
 
 Upstream status: r-devel/r-svn PR #387 and R Bugzilla 19233
-(https://bugs.r-project.org/show_bug.cgi?id=19233), filed 2026-10-20.
+(https://bugs.r-project.org/show_bug.cgi?id=19233), filed 2026-10-20
+and extended to the listing path on 2026-10-22.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
 diff --git a/src/main/dounzip.c b/src/main/dounzip.c
-index 8da78e5d16..367ebb08e4 100644
+index 8da78e5d16..e0097753bd 100644
 --- a/src/main/dounzip.c
 +++ b/src/main/dounzip.c
 @@ -25,6 +25,7 @@
@@ -84,7 +100,62 @@ index 8da78e5d16..367ebb08e4 100644
      unzClose(uf);
      UNPROTECT(1); /* names */
      return err;
-@@ -476,8 +491,9 @@ static Rboolean unz_open(Rconnection con)
+@@ -299,16 +314,23 @@ static SEXP ziplist(const char *zipname)
+     uLong i;
+     unz_global_info64 gi;
+     int err, nfiles;
++    RCNTXT cntxt;
+ 
+     uf = unzOpen64(zipname);
+     if (!uf) error(_("zip file '%s' cannot be opened"), zipname);
++    /* allocVector() below raises an R error when the entry count read
++       from the central directory is not a usable length, and that
++       unwind would leak the handle: close it from the context, which
++       also covers the explicit errors here. */
++    begincontext(&cntxt, CTXT_CCODE, R_NilValue, R_BaseEnv, R_BaseEnv,
++		 R_NilValue, R_NilValue);
++    cntxt.cend = &unz_cleanup;
++    cntxt.cenddata = uf;
+ 
+     gi.number_entry = 0; /* =Wall */
+     err = unzGetGlobalInfo64 (uf, &gi);
+-    if (err != UNZ_OK) {
+-	unzClose(uf);
++    if (err != UNZ_OK)
+ 	error("error %d with zipfile in unzGetGlobalInfo", err);
+-    }
+     nfiles = (int) gi.number_entry;
+     /* name, length, datetime */
+     PROTECT(ans = allocVector(VECSXP, 3));
+@@ -323,11 +345,8 @@ static SEXP ziplist(const char *zipname)
+ 	err = unzGetCurrentFileInfo64(uf, &file_info, filename_inzip,
+ 				      sizeof(filename_inzip), NULL, 0, NULL, 0);
+ 	if (err != UNZ_OK ||
+-	    file_info.size_filename >= sizeof(filename_inzip)) {
+-
+-	    unzClose(uf);
++	    file_info.size_filename >= sizeof(filename_inzip))
+ 	    error("error %d with zipfile in unzGetCurrentFileInfo\n", err);
+-	}
+ 	/* In theory at least bit 11 of the flag tells us that the
+ 	   filename is in UTF-8, so FIXME */
+ 	SET_STRING_ELT(names, i, mkChar(filename_inzip));
+@@ -342,12 +361,11 @@ static SEXP ziplist(const char *zipname)
+ 
+ 	if (i < nfiles - 1) {
+ 	    err = unzGoToNextFile(uf);
+-	    if (err != UNZ_OK) {
+-		unzClose(uf);
++	    if (err != UNZ_OK)
+ 		error("error %d with zipfile in unzGoToNextFile\n", err);
+-	    }
+ 	}
+     }
++    endcontext(&cntxt);
+     unzClose(uf);
+ 
+     UNPROTECT(1);
+@@ -476,8 +494,9 @@ static Rboolean unz_open(Rconnection con)
  	return FALSE;
      }
      if (unzLocateFile(uf, p+1, 1) != UNZ_OK) {
