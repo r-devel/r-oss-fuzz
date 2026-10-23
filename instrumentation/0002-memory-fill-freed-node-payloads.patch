@@ -1,0 +1,62 @@
+Fill the payload of freed small nodes with a sentinel byte.
+
+With PROTECTCHECK (which --enable-strict-barrier turns on, and ossfuzz.sh
+configures R with), the collector marks unreachable nodes FREESXP instead
+of just recycling them, and the CHK()ed accessors refuse to read such a
+node. That catches a use-after-free only when the read goes through an
+accessor. Inline functions, USE_RINTERNALS code and memory.c itself read
+the struct directly, and because the old payload is still there, they
+see plausible values and carry on. R's small-node allocator hands out
+nodes from its own pages, so ASAN cannot see those reads either.
+
+Overwrite the payload (and only the payload) of each small node as it is
+marked, so a stale read produces an obviously wrong pointer or number
+and fails at the point of use. Large vectors are released to malloc in
+the same collection, where ASAN already covers them, so they are left
+alone.
+
+Instrumentation, not a fix: adapted from kevinushey/r-afl
+(poison-freesxp-payload.patch). Not for upstream.
+
+diff --git a/src/main/memory.c b/src/main/memory.c
+index fc0882cb29..37ecd405e8 100644
+--- a/src/main/memory.c
++++ b/src/main/memory.c
+@@ -1140,6 +1140,29 @@ static R_INLINE R_size_t getVecSizeInVEC(SEXP s)
+ 
+ static void custom_node_free(void *ptr);
+ 
++#ifdef PROTECTCHECK
++/* Overwrite the payload of a small node that has just been marked FREESXP
++   with a fixed sentinel byte.  Marking alone leaves the old contents in
++   place, so code that still holds a stale pointer and reads through it
++   without going via a CHK()ed accessor (inline functions, USE_RINTERNALS
++   code, memory.c itself) sees plausible values and carries on.  With the
++   sentinel in place it sees an obviously wrong pointer or number instead,
++   and ASAN or the next type check reports it where it happens.  Only the
++   payload is touched: the header, the GC list links, sxpinfo (which keeps
++   OLDTYPE) and attrib must survive.  Large vectors are released to malloc
++   right after this pass, and ASAN already covers those. */
++#define FREED_FILL_BYTE 0xDE
++
++static R_INLINE void fill_freed_node(SEXP s, int node_class)
++{
++    if (node_class == 0)
++	memset(&s->u, FREED_FILL_BYTE, sizeof(s->u));
++    else if (node_class < NUM_SMALL_NODE_CLASSES)
++	memset(STDVEC_DATAPTR(s), FREED_FILL_BYTE,
++	       NodeClassSize[node_class] * sizeof(VECREC));
++}
++#endif
++
+ static void ReleaseLargeFreeVectors(void)
+ {
+     for (int node_class = CUSTOM_NODE_CLASS; node_class <= LARGE_NODE_CLASS; node_class++) {
+@@ -1915,6 +1938,7 @@ static int RunGenCollect(R_size_t size_needed)
+ 		if (TYPEOF(s) != FREESXP) {
+ 		    SETOLDTYPE(s, TYPEOF(s));
+ 		    SET_TYPEOF(s, FREESXP);
++		    fill_freed_node(s, i);
+ 		}
+ 		if (gc_inhibit_release)
+ 		    FORWARD_NODE(s);

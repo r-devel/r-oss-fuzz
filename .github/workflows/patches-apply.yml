@@ -1,10 +1,11 @@
 name: Patches apply
 
-# Fast check that every patch in patches/ still applies to R trunk, in
-# filename order, exactly as ossfuzz.sh applies them when the base image is
-# built.  patches/ carries fixes that have not landed in R yet, and trunk
-# moves daily, so a patch can stop applying (context drift) or become
-# redundant (the fix landed) without anyone touching this repository.
+# Fast check that every patch in patches/ and instrumentation/ still applies
+# to R trunk, in filename order, exactly as ossfuzz.sh applies them when the
+# base image is built.  patches/ carries fixes that have not landed in R yet
+# and instrumentation/ carries fuzzing-only changes; trunk moves daily, so a
+# patch can stop applying (context drift) or become redundant (the fix
+# landed) without anyone touching this repository.
 # ossfuzz.sh deliberately tolerates both when building the image, so that
 # one stale patch cannot take every fuzz target down; this check is where
 # they are supposed to fail instead, loudly and early.
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - 'patches/**'
+      - 'instrumentation/**'
       - 'ossfuzz.sh'
       - '.github/workflows/patches-apply.yml'
   schedule:

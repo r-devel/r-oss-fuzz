@@ -139,6 +139,14 @@ static void fuzz_init_r(void)
     fuzz_set_r_home();
     fuzz_set_vsize_limit();
 
+    /* GC consistency failures ("untraced old-to-new reference", a node
+     * with a bad type) are memory corruption, not input errors.  R's
+     * default is to report and carry on; this makes gc_error() fatal
+     * (through R_Suicide, which instrumentation/0004 turns into abort)
+     * so they surface as crashes at the collection that found them. */
+    if (getenv("_R_GC_FAIL_ON_ERROR_") == NULL)
+        setenv("_R_GC_FAIL_ON_ERROR_", "yes", 1);
+
     /* R's SIGSEGV/SIGILL/etc. handlers enter an interactive recovery
      * prompt instead of crashing, which would hang the fuzzer.  Telling
      * R not to install them (rather than resetting to SIG_DFL after

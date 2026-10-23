@@ -1,0 +1,30 @@
+Make R_Suicide() abort instead of exiting.
+
+A fatal R error (a GC consistency failure with _R_GC_FAIL_ON_ERROR_ set,
+a C stack overflow while handling an error, a failed startup) ends in
+Rstd_Suicide(), which prints one line and exits with status 2. libFuzzer
+does notice a target that exits, but the report carries no stack trace
+and every such exit deduplicates to the same signature. abort() instead:
+the sanitizer runtime prints where it happened and ClusterFuzz files it
+under that location.
+
+Instrumentation, not a fix: adapted from kevinushey/r-afl
+(suicide-abort.patch). Not for upstream.
+
+diff --git a/src/unix/sys-std.c b/src/unix/sys-std.c
+index f86c2672d6..1a5c066687 100644
+--- a/src/unix/sys-std.c
++++ b/src/unix/sys-std.c
+@@ -70,8 +70,10 @@ extern FILE* ifp; /* from system.c */
+ attribute_hidden void Rstd_Suicide(const char *s)
+ {
+     REprintf("Fatal error: %s\n", s);
+-    /* Might be called before translation is running */
+-    R_CleanUp(SA_SUICIDE, 2, 0);
++    /* A clean exit(2) would end the fuzzing process with no trace of
++       where the fatal error came from; abort() gets a stack trace from the
++       sanitizer runtime and deduplicates on it. */
++    abort();
+ }
+ 
+ /*

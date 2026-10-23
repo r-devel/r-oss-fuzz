@@ -27,12 +27,14 @@ on:
       - 'ossfuzz.sh'
       - 'docker/base/**'
       - 'patches/**'
+      - 'instrumentation/**'
       - '.github/workflows/base-image.yml'
   pull_request:
     paths:
       - 'ossfuzz.sh'
       - 'docker/base/**'
       - 'patches/**'
+      - 'instrumentation/**'
       - '.github/workflows/base-image.yml'
 
 permissions: read-all

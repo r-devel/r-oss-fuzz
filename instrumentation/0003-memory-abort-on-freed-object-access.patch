@@ -1,0 +1,41 @@
+Abort, rather than signal an R error, when an accessor meets a freed node.
+
+Under PROTECTCHECK the CHK() wrapper on CAR, CDR, STRING_ELT and the
+other accessors detects a read of a node the collector has already
+freed, and reports it with error(). Inside a fuzz harness every R error
+is caught by R_ToplevelExec and the input is simply discarded, so the
+one check that detects a use-after-free in R's own node heap, where
+ASAN cannot see, produces no report at all. Print the message and
+abort() instead; the sanitizer runtime turns that into a crash with a
+stack trace at the point of use.
+
+The other GC consistency failures already go through gc_error(), which
+R_Suicide()s when _R_GC_FAIL_ON_ERROR_ is set; the harnesses set it, and
+instrumentation/0004 makes R_Suicide() abort.
+
+Instrumentation, not a fix: adapted from kevinushey/r-afl
+(fatal-gc-errors.patch), reduced to the one change that matters now that
+gc_error() has its own switch. Not for upstream.
+
+diff --git a/src/main/memory.c b/src/main/memory.c
+index 37ecd405e8..abeedae1da 100644
+--- a/src/main/memory.c
++++ b/src/main/memory.c
+@@ -157,9 +157,14 @@ attribute_hidden int R_gc_running(void) { return R_in_gc; }
+ static R_INLINE SEXP CHK(SEXP x)
+ {
+     /* **** NULL check because of R_CurrentExpr */
+-    if (x != NULL && TYPEOF(x) == FREESXP)
+-	error("unprotected object (%p) encountered (was %s)",
+-	      (void *)x, sexptype2char(OLDTYPE(x)));
++    if (x != NULL && TYPEOF(x) == FREESXP) {
++	/* An R error here would be caught by the fuzz harness's top-level
++	   context and look like any other rejected input.  This is memory
++	   corruption, so stop where it is found. */
++	REprintf("unprotected object (%p) encountered (was %s)\n",
++		 (void *)x, sexptype2char(OLDTYPE(x)));
++	abort();
++    }
+     return x;
+ }
+ #else
