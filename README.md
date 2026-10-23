@@ -35,6 +35,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `agrep` \*     | `agrep` / `agrepl` — TRE approximate (edit-distance) matching |
 | `character`    | character widths, substrings, quoting, names, and raw conversion |
 | `coerce`       | string→type conversion (`as.numeric`, `as.complex`, `as.logical`, `type.convert`) |
+| `colors`       | `col2rgb` / `palette` / `rgb` / `hsv` / `hcl` / `gray` — colour-string parsing and numeric colour construction (grDevices `colors.c`) |
 | `connections`  | `file(encoding=)`, `gzfile`/`bzfile`/`xzfile`/`zstdfile`, `gzcon`, `rawConnection` — the connection layer's readers and re-encoding (`connections.c`) |
 | `datetime`     | `strptime` / `as.Date` / `as.POSIXct` / `as.POSIXlt` (`Rstrptime.h`, `datetime.c`) |
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
@@ -46,6 +47,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
+| `readtable`    | `read.table` / `read.csv` / `count.fields` / `write.table` — the header pre-reader, field counter and quoting writer in utils `io.c` that `scan` never reaches |
 | `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
 | `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
 | `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |

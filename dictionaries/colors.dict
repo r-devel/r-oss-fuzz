@@ -1,0 +1,80 @@
+#
+# libFuzzer dictionary for grDevices colour parsing.
+#
+# Hex specifications of every accepted length and a few rejected ones,
+# palette indices at and beyond integer range, colour names in the
+# spellings name2col normalises, palette keywords, and numeric literals
+# the scalers must range-check.
+#
+
+# Hex colours (#RGB, #RGBA, #RRGGBB, #RRGGBBAA) and near misses
+"#"
+"#FFF"
+"#FFF8"
+"#FFFFFF"
+"#FFFFFF80"
+"#ffffff"
+"#000000"
+"#00000000"
+"#GGGGGG"
+"#FFFFF"
+"#FFFFFFF"
+"#FFFFFFFFF"
+
+# Palette indices
+"0"
+"1"
+"8"
+"9"
+"1024"
+"1025"
+"2147483647"
+"2147483648"
+"4294967296"
+"1e10"
+"1e308"
+"1.5"
+"1x"
+"08"
+
+# Colour names
+"red"
+"RED"
+"Red"
+"transparent"
+"NA"
+"white"
+"black"
+"gray"
+"grey"
+"gray50"
+"grey100"
+"gray101"
+"lightgoldenrodyellow"
+"light goldenrod yellow"
+"Light Goldenrod Yellow"
+"darkslategray4"
+"default"
+"viridis"
+"Viridis"
+"Blue-Red"
+
+# Numeric values for rgb/hsv/hcl/gray
+"0.5"
+"1"
+"255"
+"256"
+"-1"
+"-0"
+"NaN"
+"Inf"
+"-Inf"
+"1e-320"
+"360"
+"720"
+"-360"
+"100"
+"1e9"
+
+# Separator
+"\x0a"
