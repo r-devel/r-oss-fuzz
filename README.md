@@ -45,7 +45,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `dcf`          | `read.dcf()` — DESCRIPTION and PACKAGES metadata parsing |
 | `decompress`   | `memDecompress` — R's gzip/bzip2/xz wrapper layer      |
 | `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
-| `eval` \*      | interpreted evaluation of R source over an allowlist of primitives — closures, promises, scoping, control flow, vector indexing and arithmetic (`eval.c`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`); see [`docs/eval.md`](./docs/eval.md) |
+| `eval` \*      | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
 | `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |

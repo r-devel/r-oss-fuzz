@@ -2,8 +2,9 @@
 
 `eval` parses UTF-8 R source and evaluates the expressions in order, in a
 fresh environment whose locked parent holds a small allowlist of primitives.
-Where `parse` stops at `R_ParseVector`, this target runs what was parsed: the
-AST interpreter (`eval.c`), environments and promises (`envir.c`), closures
+Where `parse` stops at `R_ParseVector`, this target byte-compiles what was
+parsed and runs it: the byte-code interpreter (`bcEval` in `eval.c`) with the
+AST interpreter behind it, environments and promises (`envir.c`), closures
 and argument matching, `[`/`[[`/`$` and their replacement forms (`subset.c`,
 `subassign.c`), arithmetic and comparison (`arithmetic.c`, `relop.c`,
 `logic.c`), coercion (`coerce.c`) and the `c()`/`list()` builders. Results are
@@ -39,9 +40,9 @@ environment accessors or `<<-`, attribute and class setters, S3/S4 dispatch,
 over the source text: `base::system` fails because `::` is unbound. Closures
 the input defines inherit the restricted environment, and primitive names can
 be shadowed only in the input's own environment, which the next input never
-sees. JIT compilation and default packages are disabled at initialization,
-so what runs is the AST interpreter, and nothing is attached that could leak
-through a method lookup.
+sees. No default packages are attached, so nothing could leak through a
+method lookup; the JIT is off because the harness compiles explicitly, as
+the next section describes.
 
 The allowlist is not a security sandbox and cannot contain a bug in the
 interpreter; the fuzzing host is disposable, so it does not need to. It
@@ -51,6 +52,49 @@ ordinary R code: nothing here needs `.Internal`, `body<-`, `environment<-`
 or any other entry point that R-core treats as "you asked for it", which is
 what makes a report from this target unambiguous.
 
+## Byte-code
+
+Nearly all R code that runs in a session is byte-compiled: package code at
+install time, everything else by the JIT after a call or two. The harness
+therefore compiles each top-level expression with `compiler::compile()`
+before evaluating it, with the execution budget paused. Closures the input
+defines are created with compiled bodies (`MAKECLOSURE`), top-level loops are
+compiled, and an expression the compiler declines runs through the AST
+interpreter, which is also the JIT's fallback. The AST interpreter still
+sees the `:` wrapper, promise code and whatever the compiler refuses, so
+both interpreters are exercised, in roughly the proportion a session has.
+
+The JIT itself is not used. It compiles on its own schedule (small closures
+on their second call, top-level loops only in the global environment), keeps
+a cache across inputs that would make one input's compilation depend on an
+earlier one, and catches errors raised inside the compiler, which would
+swallow a budget error and leave the budget switched off. Compiling from the
+harness avoids all three and costs 1 to 5 ms per expression under ASAN.
+
+The compiler needs two things from the sandbox, both in
+`LLVMFuzzerInitialize`. It refuses an environment whose chain does not end
+in a frame `topenv()` recognises, and it inlines base syntax and arithmetic
+only for names it finds in a frame it classifies as base, going by the
+frame's `name` attribute. The allowlist frame therefore carries the name of
+base's package frame. Its bindings are base's own primitives, so the
+`BASEGUARD` check compiled code makes before an inlined builtin call passes,
+and a name the input rebinds is still looked up like any other. The `:`
+wrapper lives in a separate frame below the allowlist, which the compiler
+classifies as local and so calls rather than inlining; the `COLON`
+instruction would bypass the cap. Finally, the compiler's `isBaseVar()`
+compares frames by identity with `baseenv()`, which decides whether a
+`break` or `next` inside a conditional compiles to a jump or to a loop
+context; it is rebound in the compiler namespace to accept the named frame,
+so loops compile the way a session's do. `tests/eval.c` checks all of this:
+closures come back with byte-code bodies, a loop with a conditional break
+has no `STARTLOOPCNTXT`, and every bound below holds on the compiled path.
+
+The compiler's own code is byte-compiled base R and runs with the budget
+paused, so its cost is bounded by the parsed-tree limits rather than by the
+budget. Constant folding evaluates base functions on literals only, and a
+warm-up input at start-up loads the compiler's internals before fuzzing
+begins, so every input sees the same R.
+
 ## Limits
 
 | Limit | Value | Enforced by |
@@ -58,6 +102,7 @@ what makes a report from this target unambiguous.
 | input size | 8 KiB, valid UTF-8, no embedded NUL | harness, before parsing |
 | parsed tree | depth 64, 1024 nodes | post-parse walk (`eval_tree_within_budget`) |
 | vector heap | 8 MiB (`R_VSIZE` and `R_MAX_VSIZE`) | R's allocator; an ordinary R error |
+| compilation | outside the budget; bounded by the parsed-tree limits | harness (`eval_compile`) |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
 | recursion | R's `expressions` limit and C stack check | R; an ordinary R error |
@@ -117,10 +162,15 @@ environment is not needed to reproduce a crash: run the testcase with
 R_VSIZE=8Mb R_MAX_VSIZE=8Mb Rscript --vanilla testcase.R
 ```
 
-If it crashes plain R, that is the report. A testcase that only errors
-outside the harness was relying on the budget or the heap cap, which the
-exported variable and a `setTimeLimit()` call can stand in for. The
-interrupt-check budget has no user-level equivalent, but an input that
+If it crashes plain R, that is the report. `Rscript` runs the same compiler
+through the JIT, so a byte-code finding normally reproduces there too; one
+that depends on a top-level loop or a closure called only once being
+compiled can be reproduced by wrapping the testcase in a function and
+calling `compiler::cmpfun()` on it, or by compiling each top-level
+expression with `compiler::compile()` before evaluating it. A testcase that
+only errors outside the harness was relying on the budget or the heap cap,
+which the exported variable and a `setTimeLimit()` call can stand in for.
+The interrupt-check budget has no user-level equivalent, but an input that
 needs it to crash would be a budget bug, not an R bug.
 
 ## What is deliberately left out, and what comes next
@@ -142,7 +192,9 @@ allowlist should widen once this target has run quietly:
    `attributes<-`, `levels<-`, `UseMethod`, `on.exit`. Language objects are
    inert without `eval`, and attributes plus `UseMethod` open up S3
    dispatch, where a good share of historical interpreter crashes live.
-   `all(quote(x))` is in this tier.
+   `all(quote(x))` is in this tier. `seq_len` and `seq.int` build compact
+   sequences like `:` and need the same wrapper, in the same wrappers frame:
+   the compiler has instructions for both and would otherwise inline them.
 2. **Every remaining computational primitive**: the full `names.c` table
    minus the capability set (`.Internal`, `.External*`, `.Call`, `.C`,
    `.Fortran`, `.Primitive`, `environment<-`, `as.environment`, `baseenv`,

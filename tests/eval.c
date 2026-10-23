@@ -28,6 +28,46 @@ static void check_source(void *data)
     Rf_unprotect(1);
 }
 
+/* The input's last value must be a closure with a byte-code body. */
+static void check_compiled_source(void *data)
+{
+    const char *source = data;
+    eval_input_t input = { (const uint8_t *)source, strlen(source) };
+    int error = 0;
+    SEXP result;
+    Rf_protect(result = eval_source(&input, &error));
+    if (error || TYPEOF(result) != CLOSXP || TYPEOF(R_ClosureBody(result)) != BCODESXP) {
+        fprintf(stderr, "closure not compiled for: %s\n", source);
+        abort();
+    }
+    Rf_unprotect(1);
+}
+
+static void check_compiled(const char *source)
+{
+    R_ToplevelExec(check_compiled_source, (void *)source);
+    assert(eval_budget == 0);
+}
+
+/* A loop with a conditional break compiles to a jump, not a loop context,
+ * only while the isBaseVar rebinding in eval_compiler_setup takes. */
+static void check_loop_jump(void *unused)
+{
+    (void)unused;
+    SEXP env, fn, call, result;
+    Rf_protect(env = R_NewEnv(eval_wrappers, TRUE, 29));
+    Rf_protect(fn = R_ParseEvalString(
+        "function(env) {\n"
+        "    code <- compiler::compile(quote(for (i in 1:3) if (i == 2) break), env)\n"
+        "    ops <- paste(deparse(compiler::disassemble(code)), collapse = \"\")\n"
+        "    grepl(\"STARTFOR\", ops) && !grepl(\"STARTLOOPCNTXT\", ops)\n"
+        "}", R_BaseEnv));
+    Rf_protect(call = Rf_lang2(fn, env));
+    result = Rf_eval(call, R_BaseEnv);
+    assert(Rf_asLogical(result) == TRUE);
+    Rf_unprotect(3);
+}
+
 static void check(const char *source, int expect_error, double expected)
 {
     eval_check_t test = { source, expect_error, expected };
@@ -118,6 +158,21 @@ int main(int argc, char **argv)
     check("1:'a'", 1, 0);
     check(".colon(1, 2)", 1, 0);
     check(".Internal(stop(TRUE, 'x'))", 1, 0);
+
+    /* Byte-code: closures are created with compiled bodies, top-level
+     * loops are compiled, and every bound above holds on that path too. */
+    check_compiled("function(x) x + 1");
+    check_compiled("f <- function(n) { s <- 0; for (i in 1:n) if (i %% 2 == 0) s <- s + i; s }; f");
+    check("f <- function(n) { s <- 0; for (i in 1:n) if (i %% 2 == 0) s <- s + i; s }; f(10)", 0, 30);
+    check("f <- function() { x <- 0; for (i in 1:5) { if (i == 3) break; x <- i }; x }; f()", 0, 2);
+    check("f <- function(x, ...) length(list(...)); f(1, 2, 3)", 0, 2);
+    check("f <- function() g(); f()", 1, 0);
+    check("f <- function() repeat {}; f()", 1, 0);
+    check("f <- function() prod(1:1000000000); f()", 1, 0);
+    check("f <- function() length(1:1000000); f()", 0, 1000000);
+    check("f <- function() { x <- !1:999999; repeat !x }; f()", 1, 0);
+    check("f <- function() { x <- 1; x[2000000] <- 1 }; f()", 1, 0);
+    assert(R_ToplevelExec(check_loop_jump, NULL));
 
     /* Construct the tree directly: older R parsers can fail on deep syntax
      * before our post-parse guard is reached. This check is for the guard.

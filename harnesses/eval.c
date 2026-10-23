@@ -16,6 +16,10 @@
  * ordinary R code.  That second property is what makes a report from this
  * target unambiguous: nothing here needs .Internal, body<- or any other
  * "you asked for it" entry point.
+ *
+ * Each top-level expression is byte-compiled before it runs, so what is
+ * fuzzed is the byte-code interpreter with the AST interpreter behind it,
+ * the same mix a session runs; see eval_compile.
  */
 
 /* 8 MiB, not common.h's 1 GiB: the budget below is counted in evaluations,
@@ -46,9 +50,11 @@
  * budget's unit of work is too coarse; see eval_poll_budget. */
 #define FUZZ_EVAL_CPU_LIMIT 1.0
 
-static SEXP eval_builtins;
+/* The allowlist frame, the wrappers frame below it, and compiler::compile. */
+static SEXP eval_builtins, eval_wrappers, eval_compile_fn;
 
-/* Remaining interrupt checks for the current input; 0 means no limit. */
+/* Remaining interrupt checks for the current input; 0 means no limit, which
+ * is also how eval_compile pauses the count. */
 static long eval_budget;
 static clock_t eval_cpu_start;
 
@@ -84,6 +90,10 @@ static const char *const eval_primitives[] = {
  * (`function` included: it is a primitive looked up like any other), so
  * it adds no capability.  .Internal is bound there to raise the error,
  * and nowhere the input can see.
+ *
+ * The wrapper is bound in eval_wrappers, a frame of its own below the
+ * allowlist: the compiler inlines calls to names it finds in the base-like
+ * frame, and the COLON instruction would bypass the cap (see eval_compile).
  */
 static const char *const eval_wrapper_primitives[] = {
     "function", "{", "if", "&&", "==", ">=", "-", "length", "is.finite", "abs",
@@ -170,19 +180,27 @@ static void eval_import_primitives(SEXP env, const char *const *names, size_t n)
         Rf_defineVar(Rf_install(names[i]), eval_primitive(names[i]), env);
 }
 
-/* fuzz_make_wrapper, but closing over a chosen environment. */
-static SEXP fuzz_make_wrapper_in(const char *source, SEXP env)
+/* Parse and evaluate one expression of set-up code.  A failure here is a
+ * harness bug, so it stops the process rather than becoming an R error. */
+static SEXP eval_run_init(const char *source, SEXP env)
 {
     ParseStatus status;
-    SEXP text, parsed, wrapper;
+    SEXP text, parsed, value;
+    int error = 0;
+
     Rf_protect(text = Rf_mkString(source));
     Rf_protect(parsed = R_ParseVector(text, -1, &status, R_NilValue));
     if (status != PARSE_OK || XLENGTH(parsed) != 1)
         abort();
 
-    wrapper = Rf_eval(VECTOR_ELT(parsed, 0), env);
+    value = R_tryEvalSilent(VECTOR_ELT(parsed, 0), env, &error);
+    if (error) {
+        fprintf(stderr, "eval: set-up failed: %s", R_curErrorBuf());
+        abort();
+    }
+
     Rf_unprotect(2);
-    return wrapper;
+    return value;
 }
 
 static int eval_valid_utf8(const uint8_t *data, size_t size)
@@ -249,6 +267,82 @@ static int eval_tree_within_budget(SEXP x, unsigned depth, unsigned *nodes)
     }
 }
 
+/*
+ * Byte-code.
+ *
+ * Nearly all R code that runs in a session is byte-compiled: packages at
+ * install time, everything else by the JIT after a call or two.  The JIT
+ * is not used here (R_ENABLE_JIT=0): it compiles on its own schedule,
+ * keeps a cache across inputs, and catches errors inside the compiler,
+ * where a budget error would be swallowed and the budget left switched
+ * off.  Instead the harness compiles each top-level expression itself,
+ * with the budget paused, and evaluates the result.  Closures the input
+ * defines are created with compiled bodies (MAKECLOSURE), top-level loops
+ * are compiled too, and anything the compiler declines runs through the
+ * AST interpreter, which is what the JIT falls back to as well.  Compile
+ * time is bounded by the parsed-tree limits; constant folding evaluates
+ * base functions on literals only.
+ *
+ * The compiler (compiler:::cmp.R) needs two things from the sandbox.  It
+ * refuses an environment whose chain does not end in a frame topenv()
+ * recognises, and it inlines base syntax and arithmetic only for names it
+ * finds bound in a frame it classifies as base, by the frame's "name"
+ * attribute.  So eval_builtins carries the name of base's package frame.
+ * Its bindings are base's own primitives, so the BASEGUARD check that
+ * compiled code makes before an inlined builtin call passes, and a name
+ * the input rebinds is looked up like any other.  isBaseVar, which gates
+ * whether break/next compile to a jump or to a loop context, compares
+ * frames by identity instead, so it is rebound to accept the named frame;
+ * without that every loop with a conditional break would compile with a
+ * context, which a session's would not.
+ */
+static const char *const eval_compiler_setup =
+    "local({\n"
+    "    ns <- asNamespace(\"compiler\")\n"
+    "    isBaseVar <- function(var, cntxt) {\n"
+    "        info <- getInlineInfo(var, cntxt)\n"
+    "        !is.null(info) &&\n"
+    "            (identical(info$frame, .BaseNamespaceEnv) ||\n"
+    "             identical(info$frame, baseenv()) ||\n"
+    "             packFrameName(info$frame) == \"base\")\n"
+    "    }\n"
+    "    environment(isBaseVar) <- ns\n"
+    "    unlockBinding(\"isBaseVar\", ns)\n"
+    "    assign(\"isBaseVar\", isBaseVar, envir = ns)\n"
+    "    lockBinding(\"isBaseVar\", ns)\n"
+    "    compiler::compile\n"
+    "})";
+
+/* Run once at start-up, so the compiler's lazily loaded internals are in
+ * memory before the first input and every input sees the same R. */
+static const char *const eval_warmup_source =
+    "f <- function(n) {\n"
+    "    s <- 0\n"
+    "    for (i in 1:n) if (i %% 2 == 0) s <- s + i else next\n"
+    "    s\n"
+    "}\n"
+    "x <- c(f(10), 1)\n"
+    "x[[2]] <- x[1]\n"
+    "g <- function(...) list(...)\n"
+    "g(x, repeat break)\n";
+
+/* Byte-code for expr, or expr itself if the compiler declined it. */
+static SEXP eval_compile(SEXP expr, SEXP env)
+{
+    SEXP quoted, call, code;
+    int error = 0;
+    long budget = eval_budget;
+
+    Rf_protect(quoted = Rf_lang2(R_QuoteSymbol, expr));
+    Rf_protect(call = Rf_lang3(eval_compile_fn, quoted, env));
+    eval_budget = 0;
+    code = R_tryEvalSilent(call, R_BaseEnv, &error);
+    eval_budget = budget;
+    Rf_unprotect(2);
+
+    return error ? expr : code;
+}
+
 /* Caller protects the returned object immediately if it needs the result.
  * All errors (including parsing/allocation) must be under R_ToplevelExec.
  */
@@ -269,11 +363,14 @@ static SEXP eval_source(const eval_input_t *input, int *error)
     }
 
     /* One budget covers all top-level expressions of an input. */
-    Rf_protect(env = R_NewEnv(eval_builtins, TRUE, 29));
+    Rf_protect(env = R_NewEnv(eval_wrappers, TRUE, 29));
     eval_cpu_start = clock();
     eval_budget = FUZZ_EVAL_BUDGET;
     for (R_xlen_t i = 0; i < XLENGTH(parsed); i++) {
-        result = R_tryEvalSilent(VECTOR_ELT(parsed, i), env, error);
+        SEXP code;
+        Rf_protect(code = eval_compile(VECTOR_ELT(parsed, i), env));
+        result = R_tryEvalSilent(code, env, error);
+        Rf_unprotect(1);
         if (*error)
             break;
     }
@@ -289,13 +386,20 @@ static void eval_one(void *data)
     eval_source((const eval_input_t *)data, &error);
 }
 
+static void eval_run(const uint8_t *data, size_t size)
+{
+    eval_input_t input = { data, size };
+    R_ToplevelExec(eval_one, &input);
+    /* A jump past eval_source (an interrupt, not an error) skips its reset. */
+    eval_budget = 0;
+}
+
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
     (void)argc;
     (void)argv;
-    /* Keep this target focused on interpreted evaluation. Avoid loading
-     * optional packages and compiler state into a persistent worker.
-     */
+    /* The harness compiles explicitly (eval_compile); nothing is attached
+     * that a method lookup could reach. */
     setenv("R_ENABLE_JIT", "0", 1);
     setenv("R_DEFAULT_PACKAGES", "NULL", 1);
     if (getenv("R_VSIZE") == NULL)
@@ -303,22 +407,28 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     fuzz_init_r();
 
     Rf_protect(eval_builtins = R_NewEnv(R_EmptyEnv, TRUE, 97));
+    Rf_setAttrib(eval_builtins, R_NameSymbol, Rf_mkString("package:base"));
     eval_import_primitives(eval_builtins, eval_primitives,
                            sizeof(eval_primitives) / sizeof(*eval_primitives));
+    R_LockEnvironment(eval_builtins, TRUE);
 
+    Rf_protect(eval_wrappers = R_NewEnv(eval_builtins, TRUE, 29));
     SEXP private_env, colon;
     Rf_protect(private_env = R_NewEnv(R_EmptyEnv, TRUE, 29));
     eval_import_primitives(private_env, eval_wrapper_primitives,
                            sizeof(eval_wrapper_primitives) / sizeof(*eval_wrapper_primitives));
     Rf_defineVar(Rf_install(".colon"), eval_primitive(":"), private_env);
     R_LockEnvironment(private_env, TRUE);
-    Rf_protect(colon = fuzz_make_wrapper_in(eval_colon_source, private_env));
-    Rf_defineVar(Rf_install(":"), colon, eval_builtins);
+    Rf_protect(colon = eval_run_init(eval_colon_source, private_env));
+    Rf_defineVar(Rf_install(":"), colon, eval_wrappers);
     Rf_unprotect(2);
+    R_LockEnvironment(eval_wrappers, TRUE);
 
-    R_LockEnvironment(eval_builtins, TRUE);
+    eval_compile_fn = eval_run_init(eval_compiler_setup, R_BaseEnv);
+    R_PreserveObject(eval_compile_fn);
 
     R_PolledEvents = eval_poll_budget;
+    eval_run((const uint8_t *)eval_warmup_source, strlen(eval_warmup_source));
     return 0;
 }
 
@@ -328,9 +438,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         !eval_valid_utf8(data, size))
         return 0;
 
-    eval_input_t input = { data, size };
-    R_ToplevelExec(eval_one, &input);
-    /* A jump past eval_source (an interrupt, not an error) skips its reset. */
-    eval_budget = 0;
+    eval_run(data, size);
     return 0;
 }
