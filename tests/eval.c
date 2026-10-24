@@ -1,5 +1,6 @@
 /* Standalone behavioral checks; include the harness to test its boundaries. */
 #include <assert.h>
+#include <sys/wait.h>
 #include "../harnesses/eval.c"
 
 typedef struct {
@@ -231,10 +232,44 @@ static void run_checks(void *unused)
     puts("eval harness checks passed");
 }
 
+/* AFL++'s driver forks its forkserver after LLVMFuzzerInitialize, so
+ * every input runs in a child that inherited the initialized R but not
+ * the R thread.  The child must grow a new one, with R's stack check
+ * pointed at it, rather than wait forever on the old. */
+static void run_forked_checks(void *unused)
+{
+    (void)unused;
+    assert(R_CStackStart == fuzz_r_thread.stack_top);
+    check("40 + 2", 0, 42);
+    check("f <- function(n) if (n > 0) f(n - 1) else 0; f(100000)", 1, 0);
+    check("x <- list(); for (i in 1:20000) x <- list(x); "
+          "length(c(x, recursive = TRUE))", 0, 0);
+    const uint8_t source[] = "1 + 1";
+    LLVMFuzzerTestOneInput(source, sizeof(source) - 1);
+    check("40 + 2", 0, 42);
+}
+
+static void check_after_fork(void)
+{
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        fuzz_run_on_r_thread(run_forked_checks, NULL);
+        exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    /* And the parent's R thread is untouched. */
+    fuzz_run_on_r_thread(run_forked_checks, NULL);
+    puts("eval harness fork checks passed");
+}
+
 int main(int argc, char **argv)
 {
     LLVMFuzzerInitialize(&argc, &argv);
     /* The checks call R directly, so they run where R does. */
     fuzz_run_on_r_thread(run_checks, NULL);
+    check_after_fork();
     return 0;
 }

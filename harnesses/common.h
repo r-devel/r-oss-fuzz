@@ -156,6 +156,12 @@ static void fuzz_set_vsize_limit(void)
  * once, and R_CheckStack() measures against them.  The libFuzzer entry
  * points at the end of this header forward to fuzz_target_init and
  * fuzz_target_run there, and fuzz_init_r() refuses to run anywhere else.
+ *
+ * The thread does not survive a fork, and AFL++'s driver forks: its
+ * forkserver starts after LLVMFuzzerInitialize, so every input runs in a
+ * child that inherited the initialized R but no thread to run it on.
+ * An atfork handler forgets the thread in the child, and the next job
+ * starts a fresh one, which points R's stack check at its own stack.
  */
 #ifndef FUZZ_R_STACK_SIZE
 # define FUZZ_R_STACK_SIZE ((size_t)1 << 30)
@@ -182,8 +188,11 @@ static void *fuzz_r_thread_main(void *unused)
 {
     (void)unused;
     /* The frame address rather than a local's: under ASAN an address-taken
-     * local may sit on the fake stack, nowhere near this thread's stack. */
+     * local may sit on the fake stack, nowhere near this thread's stack.
+     * R_CStackStart matters only once R is initialized; fuzz_init_r()
+     * sets it again after Rf_initialize_R has overwritten it. */
     fuzz_r_thread.stack_top = (uintptr_t)__builtin_frame_address(0);
+    R_CStackStart = fuzz_r_thread.stack_top;
 
     /* libFuzzer's -timeout alarm is acted on only by the thread running
      * its loop (the main thread); delivered here it would be ignored and
@@ -217,11 +226,33 @@ static int fuzz_on_r_thread(void)
            pthread_equal(pthread_self(), fuzz_r_thread.thread);
 }
 
+/* Child side of fork: only the forking thread survives, so the R thread
+ * is gone, and if it was the one waiting in pthread_cond_wait the
+ * condition variable still counts it.  Nothing holds the mutex during a
+ * fork from either side of the handoff, so resetting both is safe;
+ * pthread_cond_destroy would wait for the phantom waiter instead. */
+static void fuzz_r_thread_forget(void)
+{
+    fuzz_r_thread.started = 0;
+    fuzz_r_thread.job = NULL;
+    fuzz_r_thread.mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    fuzz_r_thread.cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+}
+
 /* Run fn(arg) on the R thread and wait for it to return, starting the
  * thread on first use.  From the R thread itself this is a plain call. */
 static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
 {
     if (!fuzz_r_thread.started) {
+        static int atfork_registered = 0;
+        if (!atfork_registered) {
+            if (pthread_atfork(NULL, NULL, fuzz_r_thread_forget) != 0) {
+                fprintf(stderr, "fuzz: cannot register the fork handler\n");
+                abort();
+            }
+            atfork_registered = 1;
+        }
+
         pthread_attr_t attr;
         if (pthread_attr_init(&attr) != 0 ||
             pthread_attr_setstacksize(&attr, FUZZ_R_STACK_SIZE) != 0 ||
