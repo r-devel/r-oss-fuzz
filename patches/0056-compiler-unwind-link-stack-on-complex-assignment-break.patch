@@ -1,0 +1,32 @@
+Unwind the link stack when break or next appears in a complex assignment's value.
+
+cmpComplexAssign() pushes an INCLNKSTK marker before compiling the value.
+The non-tail-call context lets a break or next compile as a direct GOTO,
+which skips DECLNKSTK. The loop exit then reads the leftover link stack
+marker as a loop context and can crash. Compile the value in an argument
+context so control flow goes through the existing unwind path.
+
+A smaller reproducer is:
+    Rscript --vanilla -e 'library(compiler); cmpfun(function() 1 - repeat x[1] <- break)()'
+
+The upstream PR also adds a regression test
+(src/library/compiler/tests/loop.R), not carried here.
+
+Found by OSS-Fuzz: testcase 5106865747591168.
+R Bugzilla: https://bugs.r-project.org/show_bug.cgi?id=19252
+
+Upstream status: r-devel/r-svn PR #409, filed 2026-10-26.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/library/compiler/R/cmp.R
++++ b/src/library/compiler/R/cmp.R
+@@ -1727,7 +1727,8 @@ cmpComplexAssign <- function(symbol, lhs, value, superAssign, cb, cntxt) {
+         endOP <- ENDASSIGN.OP
+     }
+     if (! cntxt$toplevel) cb$putcode(INCLNKSTK.OP)
+-    ncntxt <- make.nonTailCallContext(cntxt)
++    ## A break or next in value must unwind the link stack marker above.
++    ncntxt <- make.argContext(cntxt)
+     cmp(value, cb, ncntxt)
+     csi <- cb$putconst(symbol)
+     cb$putcode(startOP, csi)
