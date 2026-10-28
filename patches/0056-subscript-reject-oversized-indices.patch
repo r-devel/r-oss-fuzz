@@ -5,9 +5,6 @@ when used as the requested length of a growable vector. A later assignment
 then writes beyond the allocation in EnlargeVector(). The four-statement
 reproducer for OSS-Fuzz testcase 6491489048526848 uses x[1e19] <- 0.
 
-The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
-carried here.
-
 Upstream status: r-devel/r-svn PR #415, filed 2026-10-28.
 Delete this patch once the fix lands in R trunk.
 
