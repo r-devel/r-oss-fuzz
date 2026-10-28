@@ -1,0 +1,28 @@
+Reject oversized numeric subscripts before converting them to R_xlen_t.
+
+In realSubscript(), an out-of-range double can become an invalid R_xlen_t
+when used as the requested length of a growable vector. A later assignment
+then writes beyond the allocation in EnlargeVector(). The four-statement
+reproducer for OSS-Fuzz testcase 6491489048526848 uses x[1e19] <- 0.
+
+The upstream PR also adds a regression test (tests/reg-tests-1e.R), not
+carried here.
+
+Upstream status: r-devel/r-svn PR #415, filed 2026-10-28.
+Delete this patch once the fix lands in R trunk.
+
+--- a/src/main/subscript.c
++++ b/src/main/subscript.c
+@@ -807,7 +807,11 @@ realSubscript(SEXP s, R_xlen_t ns, R_xlen_t nx, R_xlen_t *stretch,
+ 	} else isna = true;
+     }
+     if (max >= (double)nx+1.) {
+-#ifndef LONG_VECTOR_SUPPORT
++#ifdef LONG_VECTOR_SUPPORT
++	/* Avoid an out-of-range conversion to R_xlen_t. */
++	if (max > R_XLEN_T_MAX)
++	    ECALL(call, _("subscript too large"));
++#else
+ 	if (max > INT_MAX) {
+ 	    ECALL(call, _("subscript too large for 32-bit R"));
+ 	}
