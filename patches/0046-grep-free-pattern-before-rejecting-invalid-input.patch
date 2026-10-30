@@ -12,8 +12,11 @@ before signalling; do_regexec() frees before its two errors.
 Found by OSS-Fuzz: testcase 5223944442150912 (libFuzzer_r_parse,
 Direct-leak, tre_compile <- do_gsub: a gsub() call in R's own code).
 
-Upstream status: r-devel/r-svn PR #375, filed 2026-10-10 (no Bugzilla
-report yet).
+Upstream status: r-devel/r-svn PR #400, filed 2026-10-23 (no Bugzilla
+report yet).  It supersedes PR #375, the version carried here, by running
+the matching loops of grep(), regexpr(), gsub(), regexec() and strsplit()
+under a cleanup context, which also covers options(warn = 2) turning the
+first untranslatable-input warning into an error inside wtransChar2().
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
