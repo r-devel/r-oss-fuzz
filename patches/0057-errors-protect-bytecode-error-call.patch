@@ -1,0 +1,27 @@
+Protect a newly constructed byte-code assignment call while signaling and
+formatting an error.
+
+When a byte-compiled assignment raises an error, getCurrentCall() can
+inflate its assignment expression into a fresh LANGSXP. errorcall() passed
+that call through vsignalError() and verrorcall_dflt() without protecting it.
+A collection before deparse1s() could reclaim the call, producing an
+"unprotected object ... (was LANGSXP)" abort under the strict barrier.
+
+Found by OSS-Fuzz testcase 6567538138611712 (libFuzzer_r_eval) with input
+`x <- list(); x; x[2] <- x$a*9999`.
+
+Upstream status: r-devel/r-svn PR #416, filed 2026-10-28.
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/errors.c b/src/main/errors.c
+index 5c88cc52d8..6e2aa30fb3 100644
+--- a/src/main/errors.c
++++ b/src/main/errors.c
+@@ -920,2 +920,5 @@ NORET void errorcall(SEXP call, const char *format,...)
+ 
++    /* getCurrentCall() can construct a new byte-code assignment call. */
++    PROTECT(call);
++
+     va_start(ap, format);
+     vsignalError(call, format, ap);
+     va_end(ap);
