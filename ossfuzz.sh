@@ -202,10 +202,22 @@ else
     fi
     echo "ossfuzz.sh: libzstd $LIBZSTD_VERSION (static) at $LIBZSTD_PREFIX"
 
+    # Fuzz Introspector's static analysis is an LTO pass that runs as each
+    # fuzzer is linked, and sees only the code linked into that binary.
+    # Against a shared libR.so it sees the harness and nothing of R, so the
+    # introspector build makes a static libR.a instead and links it into
+    # every harness (step 3).  All other builds keep libR.so: one shared
+    # copy of R in $OUT rather than one per target.
+    if [ "${SANITIZER:-}" = introspector ]; then
+        R_LIBRARY_FLAG=--enable-R-static-lib
+    else
+        R_LIBRARY_FLAG=--enable-R-shlib
+    fi
+
     # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
     # them.  The C/C++ compiler links the sanitizer runtime.  configure
     # finds the static libdeflate and libzstd through CPPFLAGS/LDFLAGS and
-    # links them into libR.so, so neither ships to the runner.
+    # links them into libR, so neither ships to the runner.
     ./configure \
         CC="$CC" \
         CXX="$CXX" \
@@ -216,7 +228,7 @@ else
         FCFLAGS="" \
         LDFLAGS="$CFLAGS -lgfortran -L$LIBDEFLATE_PREFIX/lib -L$LIBZSTD_PREFIX/lib" \
         --prefix="$R_PREFIX" \
-        --enable-R-shlib \
+        "$R_LIBRARY_FLAG" \
         --with-x=no \
         --disable-java \
         --enable-strict-barrier \
@@ -359,6 +371,19 @@ mkdir -p "$SEED_STAGE/unserialize"
 # fuzzing everything.
 DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
 
+# How each harness links R.  Normally that is the bundled libR.so.  The
+# introspector build (see step 1) links the whole static libR.a instead,
+# using R's own recipe for embedding a static R: --whole-archive, symbols
+# exported for the packages R dlopen()s, plus BLAS, Fortran and system
+# libraries.  The recipe quotes the libR.a path, and $WORK has no spaces.
+if [ "${SANITIZER:-}" = introspector ]; then
+    R_LINK_FLAGS=$("$R_PREFIX/bin/R" CMD config --ldflags | tr -d '"')
+    # A bitcode archive the size of R; nothing in $OUT needs it.
+    rm -f "$OUT/r-install/lib/R/lib/libR.a"
+else
+    R_LINK_FLAGS="-L$R_LIB_DIR -lR"
+fi
+
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
 
@@ -374,12 +399,13 @@ for src in "$REPO"/harnesses/*.c; do
         -c "$src" -o "$WORK/${name}.o"
 
     # Link with $CXX so the sanitizer C++ runtime is pulled in.  rpath is
-    # set to $ORIGIN so the binary finds the bundled libR.so under $OUT.
+    # set to $ORIGIN so the binary finds the bundled libR.so (or, with a
+    # static libR.a, libRblas.so) under $OUT.
     $CXX $CXXFLAGS -fno-omit-frame-pointer \
         "$WORK/${name}.o" \
         -o "$OUT/$name" \
         $LIB_FUZZING_ENGINE \
-        -L"$R_LIB_DIR" -lR \
+        $R_LINK_FLAGS \
         -Wl,--disable-new-dtags \
         -Wl,-rpath,\$ORIGIN/r-install/lib/R/lib \
         -Wl,-rpath-link,"$R_LIB_DIR" \

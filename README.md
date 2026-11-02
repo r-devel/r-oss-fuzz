@@ -187,6 +187,16 @@ strict checking of the generational GC's write barrier. This surfaces C
 code that mutates R objects without the proper barrier — a class of
 memory-safety bug the sanitizers would otherwise miss.
 
+The [Fuzz Introspector](https://introspector.oss-fuzz.com/project-profile?project=r)
+build (`SANITIZER=introspector`) builds R as a static `libR.a`, not
+`libR.so`, and links all of it into every harness. Introspector's static
+analysis runs as each fuzzer is linked and sees only what is linked in, so
+against `libR.so` its report covered the harnesses and none of R. It is
+still blind to package code that R `dlopen()`s (`utils`, `grDevices`,
+`tools`, ...), and its call graph stops where `eval()` dispatches through
+R's table of builtins; past that point only the runtime coverage it
+overlays shows what the fuzzers reach.
+
 ## System dependencies
 
 Building R needs a handful of system packages (gfortran, pcre2, readline,
