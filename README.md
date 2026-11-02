@@ -195,16 +195,18 @@ lzma, bz2, zlib, curl, subversion, texinfo). Because the runtime image
 Fortran runtime (`libgfortran`, `libquadmath`) next to `libR.so`; the other
 libraries R links are already present in `base-runner`. The full apt list
 lives in the OSS-Fuzz project `Dockerfile` (`projects/r/Dockerfile` in
-`google/oss-fuzz`); adding a target that needs a new system library
-therefore requires a small change there too.
+`google/oss-fuzz`); adding a library there requires a change in that
+repository, so a new dependency is better built from source here.
 
-One dependency is built from source instead: `ossfuzz.sh` clones a pinned
-release of [libdeflate](https://github.com/ebiggers/libdeflate) and builds a
-static library with the same sanitizer flags as R, so R's `configure` picks it
-up the way it does on CRAN's macOS and Windows builds. Static linking means
-nothing extra has to ship to `base-runner`, the library is instrumented, and
-the `google/oss-fuzz` Dockerfile stays unchanged. Bump `LIBDEFLATE_VERSION`
-in `ossfuzz.sh` to update it.
+Two dependencies are built from source this way: `ossfuzz.sh` clones pinned
+releases of [libdeflate](https://github.com/ebiggers/libdeflate) and
+[zstd](https://github.com/facebook/zstd) and builds static libraries with the
+same sanitizer flags as R. R's `configure` uses libdeflate whenever it finds
+it, as on CRAN's macOS and Windows builds, and requires libzstd as of R
+4.7.0. Static linking means nothing extra has to ship to `base-runner`, the
+libraries are instrumented, and the `google/oss-fuzz` Dockerfile stays
+unchanged. Bump `LIBDEFLATE_VERSION` or `LIBZSTD_VERSION` in `ossfuzz.sh` to
+update them.
 
 ## Building locally
 
