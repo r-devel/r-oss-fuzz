@@ -19,38 +19,29 @@ sizeof(tmp).  Once the escape holds 32 or more hex digits the stores at
 "tmp[i] = 0".  (A 32-digit value overflows the long that strtol() then
 produces anyway, so no legitimate pattern relies on that many digits.)
 
-The same loop has a second, latent out-of-bounds defect of the kind
-fixed in 0001: its guard "ctx->re_end - ctx->re >= 0" is still true when
-ctx->re == ctx->re_end, so an unterminated escape such as a pattern
-ending in "\x{1" reads ctx->re[0] one element past the pattern.
-
 Reject an over-long escape with REG_EBRACE -- which is how a non-hex,
-non-'}' character in the same escape is already handled one line below --
-and tighten the loop guard to "ctx->re < ctx->re_end" so it stops at the
-end of the pattern.
+non-'}' character in the same escape is already handled one line below.
 
-Note this is an out-of-bounds *write*, so it is more serious than the
-out-of-bounds read fixed in 0001.  Reachable from R via grep(), sub(),
-gsub(), regexpr() and friends (default perl=FALSE engine) whenever the
-pattern comes from an untrusted source, e.g.
+This patch originally also tightened the loop guard from
+"ctx->re_end - ctx->re >= 0" to "ctx->re < ctx->re_end" (an unterminated
+"\x{1" read one element past the pattern).  That half landed in trunk
+as r90814 (PR#18995); the bound on the digit count did not.
+
+Note this is an out-of-bounds *write*.  Reachable from R via grep(),
+sub(), gsub(), regexpr() and friends (default perl=FALSE engine)
+whenever the pattern comes from an untrusted source, e.g.
 grep(paste0("\\x{", strrep("B", 40), "}"), "x").
 
 Found by fuzzing R with libFuzzer + AddressSanitizer.
 
-Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-08-10.
+Upstream status: NOT YET REPORTED to the R Bugzilla as of 2026-11-01;
+held for the bundled-TRE update (r-devel/r-svn PR #302).
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
 --- a/src/extra/tre/tre-parse.c
 +++ b/src/extra/tre/tre-parse.c
-@@ -1499,12 +1499,14 @@
- 		      long val;
- 		      int i = 0;
- 		      ctx->re++;
--		      while (ctx->re_end - ctx->re >= 0)
-+		      while (ctx->re < ctx->re_end)
- 			{
- 			  if (ctx->re[0] == CHAR_RBRACE)
+@@ -1517,6 +1517,8 @@
  			    break;
  			  if (tre_isxdigit(ctx->re[0]))
  			    {
