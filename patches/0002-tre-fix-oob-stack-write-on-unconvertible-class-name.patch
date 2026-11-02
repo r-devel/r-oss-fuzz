@@ -25,8 +25,9 @@ names are already handled -- and clamp a full conversion to the last
 writable index.
 
 Note this is an out-of-bounds *write*, so it is more serious than the
-out-of-bounds read fixed in 0001.  Reachable from R via grep(), sub(),
-agrep() and friends whenever the pattern comes from an untrusted source.
+out-of-bounds read once carried as 0001 (fixed in trunk as r90814).
+Reachable from R via grep(), sub(), agrep() and friends whenever the
+pattern comes from an untrusted source.
 
 Found by fuzzing R with libFuzzer + AddressSanitizer.
 

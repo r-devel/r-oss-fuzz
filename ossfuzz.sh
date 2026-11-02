@@ -18,10 +18,12 @@
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R_SOURCE="${R_SOURCE:-$SRC/r-source}"
 
-# libdeflate is built from source here rather than installed from apt (see
-# the "Dependencies built from source" step below).  Pinned to a release tag
-# so builds are reproducible; bump deliberately.
+# libdeflate and libzstd are built from source here rather than installed
+# from apt (see the "Dependencies built from source" step below).  Pinned to
+# release tags so builds are reproducible; bump deliberately.  (Not named
+# ZSTD_VERSION: zstd's Makefile reads that from the environment.)
 LIBDEFLATE_VERSION="${LIBDEFLATE_VERSION:-1.26}"
+LIBZSTD_VERSION="${LIBZSTD_VERSION:-1.5.7}"
 
 # Where R gets installed.  Two optional knobs let the expensive R build be
 # hoisted out of the per-run build, which is what the ClusterFuzzLite setup
@@ -172,19 +174,47 @@ else
     fi
     echo "ossfuzz.sh: libdeflate $LIBDEFLATE_VERSION (static) at $LIBDEFLATE_PREFIX"
 
+    # libzstd (zstdfile(), memCompress(type = "zstd"), zstd-compressed
+    # save files) is required by R's configure as of R 4.7.0, and the
+    # OSS-Fuzz image has none.  Built from source for the same reasons
+    # as libdeflate.
+    LIBZSTD_PREFIX="$WORK/libzstd"
+    if [ ! -f "$LIBZSTD_PREFIX/lib/libzstd.a" ]; then
+        rm -rf "$WORK/libzstd-src"
+        git -c advice.detachedHead=false clone -q --depth 1 \
+            --branch "v$LIBZSTD_VERSION" \
+            https://github.com/facebook/zstd.git "$WORK/libzstd-src"
+        # zstd's Makefile rather than its CMake build, which forces
+        # CMAKE_BUILD_TYPE=Release: CFLAGS given on the command line
+        # replace the Makefile's own, so again only $CFLAGS apply.  PIC
+        # for libR.so, as above.  ZSTD_NO_ASM drops the x86-64 assembly
+        # Huffman decoder, which ASAN and coverage cannot see into, in
+        # favour of the C one.  The static library is single-threaded,
+        # which is all R uses.
+        make -C "$WORK/libzstd-src/lib" -j"$(nproc)" libzstd.a \
+            CC="$CC" \
+            CFLAGS="$CFLAGS -fno-omit-frame-pointer -fPIC" \
+            ZSTD_NO_ASM=1 \
+            > /dev/null
+        make -C "$WORK/libzstd-src/lib" install-static install-includes \
+            PREFIX="$LIBZSTD_PREFIX" \
+            > /dev/null
+    fi
+    echo "ossfuzz.sh: libzstd $LIBZSTD_VERSION (static) at $LIBZSTD_PREFIX"
+
     # Don't pass sanitizer flags to Fortran -- gfortran doesn't understand
     # them.  The C/C++ compiler links the sanitizer runtime.  configure
-    # finds the static libdeflate through CPPFLAGS/LDFLAGS and links it
-    # into libR.so, so nothing libdeflate-related ships to the runner.
+    # finds the static libdeflate and libzstd through CPPFLAGS/LDFLAGS and
+    # links them into libR.so, so neither ships to the runner.
     ./configure \
         CC="$CC" \
         CXX="$CXX" \
         CFLAGS="$CFLAGS -fno-omit-frame-pointer" \
         CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer" \
-        CPPFLAGS="-I$LIBDEFLATE_PREFIX/include" \
+        CPPFLAGS="-I$LIBDEFLATE_PREFIX/include -I$LIBZSTD_PREFIX/include" \
         FFLAGS="" \
         FCFLAGS="" \
-        LDFLAGS="$CFLAGS -lgfortran -L$LIBDEFLATE_PREFIX/lib" \
+        LDFLAGS="$CFLAGS -lgfortran -L$LIBDEFLATE_PREFIX/lib -L$LIBZSTD_PREFIX/lib" \
         --prefix="$R_PREFIX" \
         --enable-R-shlib \
         --with-x=no \
