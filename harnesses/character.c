@@ -35,6 +35,69 @@
 #define NEED_AUX    0x08
 #define NEED_AUXU   0x10
 #define NEED_REGEX  0x20   /* aux is a regex: apply the repeat guard */
+#define NEED_CHARTR 0x40   /* aux is a chartr spec: apply the table guard */
+
+/*
+ * Guard against chartr()'s range expansion.
+ *
+ * In a multibyte locale do_chartr() expands every range of 'old' (and of
+ * 'new') into one entry of a table it then sorts.  The table is bounded
+ * per range by the 1114111 code points (patches/0049) but not per spec:
+ * a 6.5 KB 'old' repeating "2-\U000E0078" 93 times is an 85-million-entry
+ * table, 340 MB and a 17 s sort under ASAN (64 s on the bot).  A spec's
+ * cost is linear in the size it declares, so refuse one whose entries,
+ * counted the way do_chartr() parses ranges, exceed FUZZ_MAX_CHARTR_TABLE.
+ * The count is taken on a lenient UTF-8 decode; R rejects what it cannot
+ * decode before expanding anything.
+ */
+#define FUZZ_MAX_CHARTR_TABLE 2000000.0
+
+static size_t fuzz_decode_utf8(const unsigned char *p, unsigned int *cp)
+{
+    unsigned int c = p[0];
+    size_t len = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+    unsigned int v = len == 1 ? c : c & (0x7f >> len);
+    for (size_t i = 1; i < len; i++) {
+        if ((p[i] & 0xc0) != 0x80) {
+            *cp = c;   /* not a sequence: one entry per byte */
+            return 1;
+        }
+        v = (v << 6) | (p[i] & 0x3f);
+    }
+    *cp = v;
+    return len;
+}
+
+static int fuzz_chartr_table_excessive(const char *spec)
+{
+    const unsigned char *p = (const unsigned char *)spec;
+    size_t n = strlen(spec);
+    unsigned int cps[4];
+    size_t lens[4];
+    double entries = 0.0;
+
+    size_t i = 0;
+    while (i < n) {
+        /* decode up to three characters: a range is "x-y" */
+        size_t k = 0, j = i;
+        while (k < 3 && j < n) {
+            lens[k] = fuzz_decode_utf8(p + j, &cps[k]);
+            j += lens[k];
+            k++;
+        }
+        if (k == 3 && cps[1] == '-') {
+            if (cps[2] >= cps[0])
+                entries += (double)(cps[2] - cps[0]) + 1.0;
+            i += lens[0] + lens[1] + lens[2];
+        } else {
+            entries += 1.0;
+            i += lens[0];
+        }
+        if (entries > FUZZ_MAX_CHARTR_TABLE)
+            return 1;
+    }
+    return 0;
+}
 
 static SEXP input_string;   /* native */
 static SEXP input_utf8;     /* same bytes, marked UTF-8 */
@@ -181,9 +244,9 @@ int fuzz_target_init(int *argc, char ***argv)
      * characters, which toupper preserves, so the spec parser (ranges,
      * escapes) runs on fuzzed text while the call stays valid. */
     Rf_protect(calls[k] = Rf_lang4(chartr, aux_string, upper_aux, input_string));
-    needs[k++] = NEED_X | NEED_AUX;
+    needs[k++] = NEED_X | NEED_AUX | NEED_CHARTR;
     Rf_protect(calls[k] = Rf_lang4(chartr, aux_utf8, upper_aux_utf8, input_utf8));
-    needs[k++] = NEED_XU | NEED_AUXU;
+    needs[k++] = NEED_XU | NEED_AUXU | NEED_CHARTR;
 
     /* strtoi in the bases with distinct digit handling */
     Rf_protect(calls[k] = Rf_lang3(strtoi, input_string, ten));
@@ -261,6 +324,8 @@ int fuzz_target_run(const uint8_t *data, size_t size)
 
     /* TRE duplicates the AST for counted repeats; see common.h. */
     if ((need & NEED_REGEX) && fuzz_repeat_product_excessive(aux))
+        return 0;
+    if ((need & NEED_CHARTR) && fuzz_chartr_table_excessive(aux))
         return 0;
 
     if ((need & NEED_X) && !fuzz_set_string(input_string, subject))
