@@ -29,8 +29,9 @@ ALTREP sequence costs nothing to create at any length, and the reductions
 without an ALTREP shortcut (`prod`, or `min`/`max`/`sum` with two arguments)
 then walk a billion elements in C with no interrupt check: 8 to 18 seconds
 under ASAN, invisible to the budget below and a certain timeout report. The
-wrapper refuses sequences of a million elements or more and otherwise calls
-the primitive. Its enclosure is a private environment holding only what its
+wrapper refuses sequences of a million elements or more, measured from the
+first element of each argument as `:` itself does, and otherwise calls the
+primitive. Its enclosure is a private environment holding only what its
 body names, so it adds no capability.
 
 There are no bindings for filesystem, network or process access, `.Internal`,

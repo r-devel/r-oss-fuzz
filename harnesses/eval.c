@@ -86,6 +86,11 @@ static const char *const eval_primitives[] = {
  * else in the allowlist builds a long vector without allocating it, and
  * allocation is bounded by the vector heap.
  *
+ * The cap measures what `:` itself uses: the first element of each
+ * argument, as a double, so a longer vector or a character argument
+ * (`c(1e12, 1):5`, `"1":"1e9"`) is bounded like a scalar.  The earlier
+ * guard only applied to two length-1 arguments and let those through.
+ *
  * The wrapper's enclosure holds only what its definition and body name
  * (`function` included: it is a primitive looked up like any other), so
  * it adds no capability.  .Internal is bound there to raise the error,
@@ -96,15 +101,18 @@ static const char *const eval_primitives[] = {
  * frame, and the COLON instruction would bypass the cap (see eval_compile).
  */
 static const char *const eval_wrapper_primitives[] = {
-    "function", "{", "if", "&&", "==", ">=", "-", "length", "is.finite", "abs",
-    ".Internal"
+    "function", "{", "if", "&&", ">=", "-", "<-", "length", "[[", "as.double",
+    "is.finite", "abs", ".Internal"
 };
 
 static const char *const eval_colon_source =
     "function(from, to) {\n"
-    "    if (length(from) == 1L && length(to) == 1L &&\n"
-    "        is.finite(from) && is.finite(to) && abs(to - from) >= 1e6)\n"
-    "        .Internal(stop(TRUE, \"sequence too long for the eval target\"))\n"
+    "    if (length(from) >= 1L && length(to) >= 1L) {\n"
+    "        f <- as.double(from[[1L]])\n"
+    "        t <- as.double(to[[1L]])\n"
+    "        if (is.finite(f) && is.finite(t) && abs(t - f) >= 1e6)\n"
+    "            .Internal(stop(TRUE, \"sequence too long for the eval target\"))\n"
+    "    }\n"
     "    .colon(from, to)\n"
     "}";
 
