@@ -187,6 +187,14 @@ static void run_checks(void *unused)
     check("`:`(1, 3)[3]", 0, 3);
     check("1:NA", 1, 0);
     check("1:'a'", 1, 0);
+    /* `:` takes the first element of a longer argument, and coerces a
+     * character one; the cap must see those the same way. */
+    check("c(1e12, 1):5", 1, 0);
+    check("1:c(1e12, 1)", 1, 0);
+    check("sum(1, -c(9999, 1)^3:9991)", 1, 0);
+    check("'1':'1e9'", 1, 0);
+    check("length(c(2, 9):4)", 0, 3);
+    check("length('1':'3')", 0, 3);
     check(".colon(1, 2)", 1, 0);
     check(".Internal(stop(TRUE, 'x'))", 1, 0);
 
