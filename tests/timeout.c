@@ -39,12 +39,15 @@ int fuzz_target_run(const uint8_t *data, size_t size)
 
 /* The stand-in for libFuzzer's alarm. */
 static struct timespec unit_start;
+static int unit_running;
 
 static void standin_alarm(int sig, siginfo_t *info, void *context)
 {
     (void)sig;
     (void)info;
     (void)context;
+    if (!unit_running)
+        return;
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
     long seconds = now.tv_sec - unit_start.tv_sec;
@@ -78,7 +81,9 @@ static void standin_start(void)
 static void standin_run(const char *source)
 {
     clock_gettime(CLOCK_REALTIME, &unit_start);
+    unit_running = 1;
     LLVMFuzzerTestOneInput((const uint8_t *)source, strlen(source) + 1);
+    unit_running = 0;
 }
 
 /* Scenarios, each the body of a child process. */
@@ -111,6 +116,26 @@ static void scenario_no_answer(void)
     standin_start();
     fuzz_run_on_r_thread(block_dump_signal, NULL);
     standin_run("Sys.sleep(60)");
+}
+
+/* An early dump request that is never answered, for an input that then
+ * finishes inside the timeout: the alarm must not be held past it. */
+static void scenario_finishes_in_time(void)
+{
+    standin_start();
+    fuzz_run_on_r_thread(block_dump_signal, NULL);
+
+    /* Re-phase the timer so a tick lands in the last second before the
+     * deadline, while the input is still running. */
+    struct itimerval timer = {
+        { TIMEOUT / 2 + 1, 0 },
+        { TIMEOUT - 1, 200 * 1000 }
+    };
+    assert(setitimer(ITIMER_REAL, &timer, NULL) == 0);
+
+    char source[64];
+    snprintf(source, sizeof source, "Sys.sleep(%g)", TIMEOUT - 0.4);
+    standin_run(source);
 }
 
 typedef struct {
@@ -204,6 +229,12 @@ int main(void)
     expect(strstr(result.output, "    #0 ") == NULL, "no-answer: no frames", &result);
     expect(strstr(result.output, standin) != NULL, "no-answer: report printed", &result);
     expect(result.seconds < TIMEOUT + (TIMEOUT / 2 + 1) + 5 + 3, "no-answer: wait bounded", &result);
+
+    /* An unanswered early request must not turn a finishing input into a timeout. */
+    run_scenario("finishes-in-time", scenario_finishes_in_time, &result);
+    expect(strstr(result.output, header) != NULL, "finishes-in-time: dump was requested", &result);
+    expect(exited_with(&result, 0), "finishes-in-time: no timeout", &result);
+    expect(strstr(result.output, standin) == NULL, "finishes-in-time: no report", &result);
 
     puts("timeout diagnostics checks passed");
     return 0;

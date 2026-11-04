@@ -258,8 +258,10 @@ static void fuzz_r_thread_forget(void)
  * little behind, and the dump is taken a second early to make up for it:
  * an input that times out is never left without one, and should a tick
  * land inside that second the dump is simply from one tick earlier, as
- * each input is dumped at most once.  Ticks that catch a fast input
- * print nothing.
+ * each input is dumped at most once.  Only the tick that times out waits
+ * for the dump to finish: an input still within its time may yet
+ * complete, and libFuzzer must not be held past the deadline on its
+ * behalf.  Ticks that catch a fast input print nothing.
  */
 #ifdef SIGRTMIN
 # define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
@@ -314,14 +316,20 @@ static long fuzz_input_seconds(void)
 /* Runs on the main thread, where libFuzzer's alarm lands. */
 static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 {
-    if (atomic_load(&fuzz_alarm.running) &&
-        atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_NONE &&
-        fuzz_input_seconds() >= fuzz_alarm.timeout - 1) {
-        atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_REQUESTED);
-        fuzz_write_stderr("==fuzz== R thread, where the input is running:\n");
-        if (pthread_kill(fuzz_r_thread.thread, FUZZ_DUMP_SIGNAL) == 0) {
-            /* Symbolizing takes a moment; a thread that never answers
-             * (stuck in the allocator, say) must not hold up the report. */
+    if (atomic_load(&fuzz_alarm.running)) {
+        long seconds = fuzz_input_seconds();
+
+        if (atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_NONE &&
+            seconds >= fuzz_alarm.timeout - 1) {
+            atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_REQUESTED);
+            fuzz_write_stderr("==fuzz== R thread, where the input is running:\n");
+            if (pthread_kill(fuzz_r_thread.thread, FUZZ_DUMP_SIGNAL) != 0)
+                atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_DONE);
+        }
+
+        /* Symbolizing takes a moment; a thread that never answers (stuck
+         * in the allocator, say) must not hold up the report. */
+        if (seconds >= fuzz_alarm.timeout) {
             for (int i = 0; i < 500; i++) {
                 if (atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_DONE)
                     break;
