@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -179,7 +180,6 @@ static struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     fuzz_job_t *job;        /* set by the caller, cleared by the thread */
-    struct timespec job_start;
     uintptr_t stack_top;    /* where the thread's frames begin */
 } fuzz_r_thread = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -253,9 +253,13 @@ static void fuzz_r_thread_forget(void)
  * wrapper goes in after libFuzzer's startup because libFuzzer leaves an
  * already-installed SIGALRM handler alone.
  *
- * Every alarm tick (timeout/2+1 s apart) comes through here, so the
- * elapsed-time check mirrors libFuzzer's: the dump is printed on the tick
- * that will time out, not on the earlier ones that catch a fast input.
+ * Every alarm tick (timeout/2+1 s apart) comes through here.  libFuzzer
+ * times the input from just before its callback, so this clock runs a
+ * little behind, and the dump is taken a second early to make up for it:
+ * an input that times out is never left without one, and should a tick
+ * land inside that second the dump is simply from one tick earlier, as
+ * each input is dumped at most once.  Ticks that catch a fast input
+ * print nothing.
  */
 #ifdef SIGRTMIN
 # define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
@@ -265,11 +269,15 @@ static void fuzz_r_thread_forget(void)
 
 extern void __sanitizer_print_stack_trace(void) __attribute__((weak));
 
+enum { FUZZ_DUMP_NONE, FUZZ_DUMP_REQUESTED, FUZZ_DUMP_DONE };
+
 static struct {
     int timeout;                 /* -timeout=N, seconds */
     int wrapped;
     struct sigaction chain;      /* libFuzzer's SIGALRM action */
-    volatile sig_atomic_t dumped;
+    struct timespec start;       /* of the input now on the R thread */
+    atomic_int running;          /* an input is on the R thread */
+    atomic_int dump;             /* FUZZ_DUMP_* for that input */
 } fuzz_alarm = { .timeout = 1200 };  /* libFuzzer's default */
 
 static void fuzz_write_stderr(const char *s)
@@ -288,17 +296,17 @@ static void fuzz_dump_handler(int sig, siginfo_t *info, void *context)
         __sanitizer_print_stack_trace();
     else
         fuzz_write_stderr("    (no sanitizer runtime to print it)\n");
-    fuzz_alarm.dumped = 1;
+    atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_DONE);
 }
 
-/* Whole seconds since the job began, as libFuzzer counts them. */
-static long fuzz_job_seconds(void)
+/* Whole seconds since the input began. */
+static long fuzz_input_seconds(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
 
-    long seconds = now.tv_sec - fuzz_r_thread.job_start.tv_sec;
-    if (now.tv_nsec < fuzz_r_thread.job_start.tv_nsec)
+    long seconds = now.tv_sec - fuzz_alarm.start.tv_sec;
+    if (now.tv_nsec < fuzz_alarm.start.tv_nsec)
         seconds--;
     return seconds;
 }
@@ -306,18 +314,21 @@ static long fuzz_job_seconds(void)
 /* Runs on the main thread, where libFuzzer's alarm lands. */
 static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 {
-    if (fuzz_r_thread.job != NULL && fuzz_job_seconds() >= fuzz_alarm.timeout) {
+    if (atomic_load(&fuzz_alarm.running) &&
+        atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_NONE &&
+        fuzz_input_seconds() >= fuzz_alarm.timeout - 1) {
+        atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_REQUESTED);
         fuzz_write_stderr("==fuzz== R thread, where the input is running:\n");
-        fuzz_alarm.dumped = 0;
         if (pthread_kill(fuzz_r_thread.thread, FUZZ_DUMP_SIGNAL) == 0) {
             /* Symbolizing takes a moment; a thread that never answers
              * (stuck in the allocator, say) must not hold up the report. */
-            for (int i = 0; i < 500 && !fuzz_alarm.dumped; i++) {
+            for (int i = 0; i < 500; i++) {
+                if (atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_DONE)
+                    break;
                 struct timespec tick = { 0, 10 * 1000 * 1000 };
                 nanosleep(&tick, NULL);
             }
         }
-        fuzz_write_stderr("==fuzz== main thread, where the alarm landed:\n");
     }
     fuzz_alarm.chain.sa_sigaction(sig, info, context);
 }
@@ -382,13 +393,18 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
     }
 
     fuzz_job_t job = { fn, arg };
-    clock_gettime(CLOCK_REALTIME, &fuzz_r_thread.job_start);
+    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.start);
+    atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_NONE);
+    atomic_store(&fuzz_alarm.running, 1);
+
     pthread_mutex_lock(&fuzz_r_thread.mutex);
     fuzz_r_thread.job = &job;
     pthread_cond_broadcast(&fuzz_r_thread.cond);
     while (fuzz_r_thread.job != NULL)
         pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
     pthread_mutex_unlock(&fuzz_r_thread.mutex);
+
+    atomic_store(&fuzz_alarm.running, 0);
 }
 
 /*
