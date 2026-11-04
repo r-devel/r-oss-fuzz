@@ -186,6 +186,66 @@ static void scenario_stale_dump(void)
     standin_run("Sys.sleep(60)");
 }
 
+/* A tick queues up while another is held; the input then finishes just
+ * past the stand-in's deadline.  The queued tick, delivered as the held
+ * one returns, must not report the finished input. */
+static void scenario_pending_tick(void)
+{
+    standin_start();
+    fuzz_run_on_r_thread(block_dump_signal, NULL);
+    standin_idle(TIMEOUT);
+
+    /* Ticks at 0.5 s and 2.5 s into the input. */
+    struct itimerval timer = { { TIMEOUT / 2 + 1, 0 }, { 0, 500 * 1000 } };
+    assert(setitimer(ITIMER_REAL, &timer, NULL) == 0);
+    standin_run("Sys.sleep(" STR(TIMEOUT) " + 0.3)");
+}
+
+/* A stack printer that takes its time, as symbolizing can. */
+static struct sigaction prompt_dump;
+
+static void slow_dump_handler(int sig, siginfo_t *info, void *context)
+{
+    struct timespec pause = { 0, 500 * 1000 * 1000 };
+    nanosleep(&pause, NULL);
+    prompt_dump.sa_sigaction(sig, info, context);
+}
+
+/* Once the wrapper is in (after the first input), slow its dump. */
+static void install_slow_dump(void)
+{
+    assert(sigaction(FUZZ_DUMP_SIGNAL, NULL, &prompt_dump) == 0);
+    assert(prompt_dump.sa_flags & SA_SIGINFO);
+    struct sigaction slow = prompt_dump;
+    slow.sa_sigaction = slow_dump_handler;
+    assert(sigaction(FUZZ_DUMP_SIGNAL, &slow, NULL) == 0);
+}
+
+/* A tick in the last second of an input that finishes in time: a dump
+ * would pause the R thread past the deadline, so none may be taken. */
+static void scenario_slow_dump_finishes_in_time(void)
+{
+    standin_start();
+    standin_run("1");
+    install_slow_dump();
+
+    struct itimerval timer = {
+        { TIMEOUT / 2 + 1, 0 },
+        { TIMEOUT - 1, 600 * 1000 }  /* 0.6 s into the last second */
+    };
+    assert(setitimer(ITIMER_REAL, &timer, NULL) == 0);
+    standin_run("Sys.sleep(" STR(TIMEOUT) " - 0.1)");
+}
+
+/* The slow dump still comes, in full, for an input that times out. */
+static void scenario_slow_dump_times_out(void)
+{
+    standin_start();
+    standin_run("1");
+    install_slow_dump();
+    standin_run("Sys.sleep(60)");
+}
+
 /* The wait loop on its own: a helper thread plays the R thread, landing
  * the dump 50 ms in and, if asked, finishing the input in the same
  * breath; the chained handler is a recorder.  No R is needed. */
@@ -202,9 +262,11 @@ static void *land_dump(void *data)
     int input_finishes = *(int *)data;
     struct timespec pause = { 0, 50 * 1000 * 1000 };
     nanosleep(&pause, NULL);
-    atomic_store(&fuzz_alarm.done, atomic_load(&fuzz_alarm.input));
+    /* The input is seen to finish no later than the dump, whichever poll
+     * looks first. */
     if (input_finishes)
         atomic_store(&fuzz_alarm.running, 0);
+    atomic_store(&fuzz_alarm.done, atomic_load(&fuzz_alarm.input));
     return NULL;
 }
 
@@ -349,6 +411,26 @@ int main(void)
     expect(exited_with(&result, 0), "finishes-during-wait: no timeout", &result);
     expect(strstr(result.output, standin) == NULL, "finishes-during-wait: no report", &result);
     expect(result.seconds < TIMEOUT + 2, "finishes-during-wait: released at once", &result);
+
+    /* A tick queued during the hold does not report the finished input. */
+    run_scenario("pending-tick", scenario_pending_tick, &result);
+    expect(strstr(result.output, header) != NULL, "pending-tick: dump requested", &result);
+    expect(exited_with(&result, 0), "pending-tick: no timeout", &result);
+    expect(strstr(result.output, standin) == NULL, "pending-tick: no report", &result);
+
+    /* An input that may still finish is not paused for a dump. */
+    run_scenario("slow-dump-finishes-in-time", scenario_slow_dump_finishes_in_time, &result);
+    expect(exited_with(&result, 0), "slow-dump-finishes-in-time: no timeout", &result);
+    expect(strstr(result.output, header) == NULL, "slow-dump-finishes-in-time: not dumped", &result);
+    expect(strstr(result.output, standin) == NULL, "slow-dump-finishes-in-time: no report", &result);
+
+    /* A slow dump is waited for and precedes the report. */
+    run_scenario("slow-dump-times-out", scenario_slow_dump_times_out, &result);
+    expect(exited_with(&result, TIMEOUT_EXIT), "slow-dump-times-out: chained to the alarm", &result);
+    dump = strstr(result.output, header);
+    report = strstr(result.output, standin);
+    expect(dump != NULL && report != NULL && report > dump, "slow-dump-times-out: report follows the dump", &result);
+    expect_frames(dump, "slow-dump-times-out: frames printed", &result);
 
     /* The wait ends on the dump and chains while the input still runs... */
     run_scenario("dump-lands-input-runs", scenario_dump_lands_input_runs, &result);
