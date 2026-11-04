@@ -14,7 +14,18 @@
 #define TIMEOUT_EXIT 70
 #define OUTPUT_MAX 65536
 
-/* The harness under test: the input is R source. */
+/* The harness under test: the input is R source.  A scenario may ask
+ * for the dump signal to be unblocked as the next input begins. */
+static int unblock_on_next_input;
+
+static void set_dump_signal(int how)
+{
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, FUZZ_DUMP_SIGNAL);
+    pthread_sigmask(how, &set, NULL);
+}
+
 int fuzz_target_init(int *argc, char ***argv)
 {
     (void)argc;
@@ -25,6 +36,11 @@ int fuzz_target_init(int *argc, char ***argv)
 
 int fuzz_target_run(const uint8_t *data, size_t size)
 {
+    if (unblock_on_next_input) {
+        unblock_on_next_input = 0;
+        set_dump_signal(SIG_UNBLOCK);
+    }
+
     SEXP text, exprs;
     ParseStatus status;
     Rf_protect(text = Rf_mkString((const char *)data));
@@ -86,6 +102,20 @@ static void standin_run(const char *source)
     unit_running = 0;
 }
 
+/* Sleep on the main thread through the alarm ticks. */
+static void standin_idle(double seconds)
+{
+    struct timespec left = { (time_t)seconds, (long)((seconds - (time_t)seconds) * 1e9) };
+    while (nanosleep(&left, &left) != 0)
+        continue;
+}
+
+static void block_dump_signal(void *unused)
+{
+    (void)unused;
+    set_dump_signal(SIG_BLOCK);
+}
+
 /* Scenarios, each the body of a child process. */
 static void scenario_slow(void)
 {
@@ -101,15 +131,6 @@ static void scenario_fast(void)
         standin_run("Sys.sleep(0.2)");
 }
 
-static void block_dump_signal(void *unused)
-{
-    (void)unused;
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, FUZZ_DUMP_SIGNAL);
-    pthread_sigmask(SIG_BLOCK, &set, NULL);
-}
-
 /* The R thread never answers the dump request. */
 static void scenario_no_answer(void)
 {
@@ -118,24 +139,32 @@ static void scenario_no_answer(void)
     standin_run("Sys.sleep(60)");
 }
 
-/* An early dump request that is never answered, for an input that then
- * finishes inside the timeout: the alarm must not be held past it. */
+/* The wrapper's clock runs ahead of the stand-in's by an idle spell, so
+ * a tick finds the input past the timeout by the one and within it by
+ * the other; with the dump unanswered, the input must still finish and
+ * the stand-in must not be held past its own deadline. */
+static void run_unanswered_within_timeout(void)
+{
+    fuzz_run_on_r_thread(block_dump_signal, NULL);
+    standin_idle(TIMEOUT);
+    /* Longer than a tick, so one lands while the input runs. */
+    standin_run("Sys.sleep(" STR(TIMEOUT) " - 0.5)");
+}
+
 static void scenario_finishes_in_time(void)
 {
     standin_start();
-    fuzz_run_on_r_thread(block_dump_signal, NULL);
+    run_unanswered_within_timeout();
+}
 
-    /* Re-phase the timer so a tick lands in the last second before the
-     * deadline, while the input is still running. */
-    struct itimerval timer = {
-        { TIMEOUT / 2 + 1, 0 },
-        { TIMEOUT - 1, 200 * 1000 }
-    };
-    assert(setitimer(ITIMER_REAL, &timer, NULL) == 0);
-
-    char source[64];
-    snprintf(source, sizeof source, "Sys.sleep(%g)", TIMEOUT - 0.4);
-    standin_run(source);
+/* The dump left outstanding above is delivered as the next input begins,
+ * after the handoff; the next input must still get a dump of its own. */
+static void scenario_stale_dump(void)
+{
+    standin_start();
+    run_unanswered_within_timeout();
+    unblock_on_next_input = 1;
+    standin_run("Sys.sleep(60)");
 }
 
 typedef struct {
@@ -198,23 +227,32 @@ static int exited_with(const result_t *result, int code)
     return WIFEXITED(result->status) && WEXITSTATUS(result->status) == code;
 }
 
+static const char *header = "==fuzz== R thread, where the input is running:\n";
+static const char *standin = "STANDIN: timeout\n";
+static const char *frame = "    #0 ";
+
+/* The dump from `at` on holds the R thread's frames, or says why not. */
+static void expect_frames(const char *at, const char *what, const result_t *result)
+{
+    if (__sanitizer_print_stack_trace)
+        expect(strstr(at, frame) != NULL, what, result);
+    else
+        expect(strstr(at, "no sanitizer runtime") != NULL, what, result);
+}
+
 int main(void)
 {
     static result_t result;
-    const char *header = "==fuzz== R thread, where the input is running:\n";
-    const char *standin = "STANDIN: timeout\n";
+    const char *dump, *report, *second;
 
     /* A timed-out input: the R thread's stack, then libFuzzer's report. */
     run_scenario("slow", scenario_slow, &result);
     expect(exited_with(&result, TIMEOUT_EXIT), "slow: chained to the alarm", &result);
-    const char *dump = strstr(result.output, header);
-    const char *report = strstr(result.output, standin);
+    dump = strstr(result.output, header);
+    report = strstr(result.output, standin);
     expect(dump != NULL, "slow: R thread header printed", &result);
     expect(report != NULL && report > dump, "slow: report follows the dump", &result);
-    if (__sanitizer_print_stack_trace)
-        expect(strstr(dump, "    #0 ") != NULL, "slow: R thread frames printed", &result);
-    else
-        expect(strstr(dump, "no sanitizer runtime") != NULL, "slow: placeholder printed", &result);
+    expect_frames(dump, "slow: R thread frames printed", &result);
     expect(strstr(dump + 1, header) == NULL, "slow: dumped once", &result);
 
     /* Fast inputs under alarm ticks: nothing. */
@@ -226,15 +264,26 @@ int main(void)
     run_scenario("no-answer", scenario_no_answer, &result);
     expect(exited_with(&result, TIMEOUT_EXIT), "no-answer: chained to the alarm", &result);
     expect(strstr(result.output, header) != NULL, "no-answer: header printed", &result);
-    expect(strstr(result.output, "    #0 ") == NULL, "no-answer: no frames", &result);
+    expect(strstr(result.output, frame) == NULL, "no-answer: no frames", &result);
     expect(strstr(result.output, standin) != NULL, "no-answer: report printed", &result);
     expect(result.seconds < TIMEOUT + (TIMEOUT / 2 + 1) + 5 + 3, "no-answer: wait bounded", &result);
 
-    /* An unanswered early request must not turn a finishing input into a timeout. */
+    /* A finishing input is released as soon as it finishes. */
     run_scenario("finishes-in-time", scenario_finishes_in_time, &result);
-    expect(strstr(result.output, header) != NULL, "finishes-in-time: dump was requested", &result);
+    expect(strstr(result.output, header) != NULL, "finishes-in-time: dump requested", &result);
     expect(exited_with(&result, 0), "finishes-in-time: no timeout", &result);
     expect(strstr(result.output, standin) == NULL, "finishes-in-time: no report", &result);
+    expect(result.seconds < 2 * TIMEOUT + 1, "finishes-in-time: not held for the wait", &result);
+
+    /* A dump outstanding from one input does not serve the next. */
+    run_scenario("stale-dump", scenario_stale_dump, &result);
+    expect(exited_with(&result, TIMEOUT_EXIT), "stale-dump: chained to the alarm", &result);
+    dump = strstr(result.output, header);
+    second = dump == NULL ? NULL : strstr(dump + 1, header);
+    report = strstr(result.output, standin);
+    expect(dump != NULL && second != NULL, "stale-dump: both inputs dumped", &result);
+    expect_frames(second, "stale-dump: the second input's frames printed", &result);
+    expect(report != NULL && report > second, "stale-dump: report follows the second dump", &result);
 
     puts("timeout diagnostics checks passed");
     return 0;

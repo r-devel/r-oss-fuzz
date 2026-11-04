@@ -186,82 +186,26 @@ static struct {
     .cond = PTHREAD_COND_INITIALIZER
 };
 
-static void *fuzz_r_thread_main(void *unused)
-{
-    (void)unused;
-    /* The frame address rather than a local's: under ASAN an address-taken
-     * local may sit on the fake stack, nowhere near this thread's stack.
-     * R_CStackStart matters only once R is initialized; fuzz_init_r()
-     * sets it again after Rf_initialize_R has overwritten it. */
-    fuzz_r_thread.stack_top = (uintptr_t)__builtin_frame_address(0);
-    R_CStackStart = fuzz_r_thread.stack_top;
-
-    /* libFuzzer's -timeout alarm is acted on only by the thread running
-     * its loop (the main thread); delivered here it would be ignored and
-     * the input would run on.  Block it so the kernel cannot pick this
-     * thread; fuzz_alarm_handler below gets this thread's stack into the
-     * timeout report instead. */
-    sigset_t alarm;
-    sigemptyset(&alarm);
-    sigaddset(&alarm, SIGALRM);
-    pthread_sigmask(SIG_BLOCK, &alarm, NULL);
-
-    pthread_mutex_lock(&fuzz_r_thread.mutex);
-    for (;;) {
-        while (fuzz_r_thread.job == NULL)
-            pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
-        fuzz_job_t *job = fuzz_r_thread.job;
-        pthread_mutex_unlock(&fuzz_r_thread.mutex);
-
-        job->fn(job->arg);
-
-        pthread_mutex_lock(&fuzz_r_thread.mutex);
-        fuzz_r_thread.job = NULL;
-        pthread_cond_broadcast(&fuzz_r_thread.cond);
-    }
-    return NULL;
-}
-
-static int fuzz_on_r_thread(void)
-{
-    return fuzz_r_thread.started &&
-           pthread_equal(pthread_self(), fuzz_r_thread.thread);
-}
-
-/* Child side of fork: only the forking thread survives, so the R thread
- * is gone, and if it was the one waiting in pthread_cond_wait the
- * condition variable still counts it.  Nothing holds the mutex during a
- * fork from either side of the handoff, so resetting both is safe;
- * pthread_cond_destroy would wait for the phantom waiter instead. */
-static void fuzz_r_thread_forget(void)
-{
-    fuzz_r_thread.started = 0;
-    fuzz_r_thread.job = NULL;
-    fuzz_r_thread.mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    fuzz_r_thread.cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
-}
-
 /*
  * Timeout diagnostics.
  *
  * With the alarm confined to the main thread, libFuzzer's timeout report
  * would show that thread waiting in fuzz_run_on_r_thread and nothing of
  * where R is.  So once libFuzzer has installed its SIGALRM handler, a
- * wrapper takes its place: when the input has run for the timeout it
- * first signals the R thread, which prints its own stack, and then hands
- * the alarm on to libFuzzer, which prints its report and exits.  The
- * wrapper goes in after libFuzzer's startup because libFuzzer leaves an
- * already-installed SIGALRM handler alone.
+ * wrapper takes its place: on a tick where libFuzzer may time the input
+ * out, it first signals the R thread, which prints its own stack, and
+ * then hands the alarm on to libFuzzer, which prints its report and
+ * exits.  The wrapper goes in after libFuzzer's startup because libFuzzer
+ * leaves an already-installed SIGALRM handler alone.
  *
- * Every alarm tick (timeout/2+1 s apart) comes through here.  libFuzzer
- * times the input from just before its callback, so this clock runs a
- * little behind, and the dump is taken a second early to make up for it:
- * an input that times out is never left without one, and should a tick
- * land inside that second the dump is simply from one tick earlier, as
- * each input is dumped at most once.  Only the tick that times out waits
- * for the dump to finish: an input still within its time may yet
- * complete, and libFuzzer must not be held past the deadline on its
- * behalf.  Ticks that catch a fast input print nothing.
+ * libFuzzer's clock for the input is not visible, but it starts after the
+ * main thread last went idle (armed), so the input has run for the
+ * timeout by libFuzzer's clock only if it has by that one.  Every tick
+ * (timeout/2+1 s apart) comes through here; those that find the input
+ * younger print nothing.  The wait for the dump ends as soon as the R
+ * thread finishes the input, so a tick between the two clocks' deadlines
+ * cannot hold a finishing input past its own.  Inputs are numbered so a
+ * dump outstanding from one cannot stand in for the next's.
  */
 #ifdef SIGRTMIN
 # define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
@@ -271,15 +215,15 @@ static void fuzz_r_thread_forget(void)
 
 extern void __sanitizer_print_stack_trace(void) __attribute__((weak));
 
-enum { FUZZ_DUMP_NONE, FUZZ_DUMP_REQUESTED, FUZZ_DUMP_DONE };
-
 static struct {
     int timeout;                 /* -timeout=N, seconds */
     int wrapped;
     struct sigaction chain;      /* libFuzzer's SIGALRM action */
-    struct timespec start;       /* of the input now on the R thread */
-    atomic_int running;          /* an input is on the R thread */
-    atomic_int dump;             /* FUZZ_DUMP_* for that input */
+    struct timespec armed;       /* main thread idle; libFuzzer's clock starts later */
+    atomic_int running;          /* set at handoff, cleared by the R thread */
+    atomic_uint input;           /* numbers the inputs */
+    atomic_uint requested;       /* input whose dump was requested */
+    atomic_uint done;            /* input whose dump has been printed */
 } fuzz_alarm = { .timeout = 1200 };  /* libFuzzer's default */
 
 static void fuzz_write_stderr(const char *s)
@@ -294,21 +238,22 @@ static void fuzz_dump_handler(int sig, siginfo_t *info, void *context)
     (void)sig;
     (void)info;
     (void)context;
+    unsigned input = atomic_load(&fuzz_alarm.requested);
     if (__sanitizer_print_stack_trace)
         __sanitizer_print_stack_trace();
     else
         fuzz_write_stderr("    (no sanitizer runtime to print it)\n");
-    atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_DONE);
+    atomic_store(&fuzz_alarm.done, input);
 }
 
-/* Whole seconds since the input began. */
-static long fuzz_input_seconds(void)
+/* Whole seconds since the main thread went idle before this input. */
+static long fuzz_armed_seconds(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
 
-    long seconds = now.tv_sec - fuzz_alarm.start.tv_sec;
-    if (now.tv_nsec < fuzz_alarm.start.tv_nsec)
+    long seconds = now.tv_sec - fuzz_alarm.armed.tv_sec;
+    if (now.tv_nsec < fuzz_alarm.armed.tv_nsec)
         seconds--;
     return seconds;
 }
@@ -316,26 +261,24 @@ static long fuzz_input_seconds(void)
 /* Runs on the main thread, where libFuzzer's alarm lands. */
 static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 {
-    if (atomic_load(&fuzz_alarm.running)) {
-        long seconds = fuzz_input_seconds();
-
-        if (atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_NONE &&
-            seconds >= fuzz_alarm.timeout - 1) {
-            atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_REQUESTED);
+    if (atomic_load(&fuzz_alarm.running) &&
+        fuzz_armed_seconds() >= fuzz_alarm.timeout) {
+        unsigned input = atomic_load(&fuzz_alarm.input);
+        if (atomic_load(&fuzz_alarm.requested) != input) {
+            atomic_store(&fuzz_alarm.requested, input);
             fuzz_write_stderr("==fuzz== R thread, where the input is running:\n");
             if (pthread_kill(fuzz_r_thread.thread, FUZZ_DUMP_SIGNAL) != 0)
-                atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_DONE);
+                atomic_store(&fuzz_alarm.done, input);
         }
 
         /* Symbolizing takes a moment; a thread that never answers (stuck
          * in the allocator, say) must not hold up the report. */
-        if (seconds >= fuzz_alarm.timeout) {
-            for (int i = 0; i < 500; i++) {
-                if (atomic_load(&fuzz_alarm.dump) == FUZZ_DUMP_DONE)
-                    break;
-                struct timespec tick = { 0, 10 * 1000 * 1000 };
-                nanosleep(&tick, NULL);
-            }
+        for (int i = 0; i < 5000; i++) {
+            if (atomic_load(&fuzz_alarm.done) == input ||
+                !atomic_load(&fuzz_alarm.running))
+                break;
+            struct timespec tick = { 0, 1000 * 1000 };
+            nanosleep(&tick, NULL);
         }
     }
     fuzz_alarm.chain.sa_sigaction(sig, info, context);
@@ -367,6 +310,62 @@ static void fuzz_alarm_wrap(void)
     wrapper.sa_sigaction = fuzz_alarm_handler;
     if (sigaction(SIGALRM, &wrapper, NULL) != 0)
         sigaction(FUZZ_DUMP_SIGNAL, &(struct sigaction){ .sa_handler = SIG_DFL }, NULL);
+}
+
+static void *fuzz_r_thread_main(void *unused)
+{
+    (void)unused;
+    /* The frame address rather than a local's: under ASAN an address-taken
+     * local may sit on the fake stack, nowhere near this thread's stack.
+     * R_CStackStart matters only once R is initialized; fuzz_init_r()
+     * sets it again after Rf_initialize_R has overwritten it. */
+    fuzz_r_thread.stack_top = (uintptr_t)__builtin_frame_address(0);
+    R_CStackStart = fuzz_r_thread.stack_top;
+
+    /* libFuzzer's -timeout alarm is acted on only by the thread running
+     * its loop (the main thread); delivered here it would be ignored and
+     * the input would run on.  Block it so the kernel cannot pick this
+     * thread; fuzz_alarm_handler below gets this thread's stack into the
+     * timeout report instead. */
+    sigset_t alarm;
+    sigemptyset(&alarm);
+    sigaddset(&alarm, SIGALRM);
+    pthread_sigmask(SIG_BLOCK, &alarm, NULL);
+
+    pthread_mutex_lock(&fuzz_r_thread.mutex);
+    for (;;) {
+        while (fuzz_r_thread.job == NULL)
+            pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
+        fuzz_job_t *job = fuzz_r_thread.job;
+        pthread_mutex_unlock(&fuzz_r_thread.mutex);
+
+        job->fn(job->arg);
+        atomic_store(&fuzz_alarm.running, 0);
+
+        pthread_mutex_lock(&fuzz_r_thread.mutex);
+        fuzz_r_thread.job = NULL;
+        pthread_cond_broadcast(&fuzz_r_thread.cond);
+    }
+    return NULL;
+}
+
+static int fuzz_on_r_thread(void)
+{
+    return fuzz_r_thread.started &&
+           pthread_equal(pthread_self(), fuzz_r_thread.thread);
+}
+
+/* Child side of fork: only the forking thread survives, so the R thread
+ * is gone, and if it was the one waiting in pthread_cond_wait the
+ * condition variable still counts it.  Nothing holds the mutex during a
+ * fork from either side of the handoff, so resetting both is safe;
+ * pthread_cond_destroy would wait for the phantom waiter instead. */
+static void fuzz_r_thread_forget(void)
+{
+    fuzz_r_thread.started = 0;
+    fuzz_r_thread.job = NULL;
+    fuzz_r_thread.mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    fuzz_r_thread.cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
 }
 
 /* Run fn(arg) on the R thread and wait for it to return, starting the
@@ -401,8 +400,7 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
     }
 
     fuzz_job_t job = { fn, arg };
-    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.start);
-    atomic_store(&fuzz_alarm.dump, FUZZ_DUMP_NONE);
+    atomic_fetch_add(&fuzz_alarm.input, 1);
     atomic_store(&fuzz_alarm.running, 1);
 
     pthread_mutex_lock(&fuzz_r_thread.mutex);
@@ -412,7 +410,8 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
         pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
     pthread_mutex_unlock(&fuzz_r_thread.mutex);
 
-    atomic_store(&fuzz_alarm.running, 0);
+    /* Idle again: libFuzzer's clock for the next input starts after this. */
+    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.armed);
 }
 
 /*
