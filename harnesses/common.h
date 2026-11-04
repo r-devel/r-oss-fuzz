@@ -201,11 +201,16 @@ static struct {
  * libFuzzer's clock for the input is not visible, but it starts after the
  * main thread last went idle (armed), so the input has run for the
  * timeout by libFuzzer's clock only if it has by that one.  Every tick
- * (timeout/2+1 s apart) comes through here; those that find the input
- * younger print nothing.  The wait for the dump ends as soon as the R
- * thread finishes the input, so a tick between the two clocks' deadlines
- * cannot hold a finishing input past its own.  Inputs are numbered so a
- * dump outstanding from one cannot stand in for the next's.
+ * (timeout/2+1 s apart) comes through here.  One that finds the input
+ * within a second of the timeout by that clock requests the dump and
+ * waits for it, the second covering whatever delays this handler between
+ * its reading of the clock and libFuzzer's; a tick that finds the input
+ * younger prints nothing.  An input that finishes during the wait is not
+ * handed to libFuzzer at all: by its own clock the input was at most
+ * barely out of time, and the wait would be blamed for it.  Inputs are
+ * numbered so a dump outstanding from one cannot stand in for the
+ * next's, and the R thread itself announces when an input is running, so
+ * a tick during the handoff finds nothing to dump.
  */
 #ifdef SIGRTMIN
 # define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
@@ -220,7 +225,7 @@ static struct {
     int wrapped;
     struct sigaction chain;      /* libFuzzer's SIGALRM action */
     struct timespec armed;       /* main thread idle; libFuzzer's clock starts later */
-    atomic_int running;          /* set at handoff, cleared by the R thread */
+    atomic_int running;          /* the R thread is inside an input */
     atomic_uint input;           /* numbers the inputs */
     atomic_uint requested;       /* input whose dump was requested */
     atomic_uint done;            /* input whose dump has been printed */
@@ -262,7 +267,7 @@ static long fuzz_armed_seconds(void)
 static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 {
     if (atomic_load(&fuzz_alarm.running) &&
-        fuzz_armed_seconds() >= fuzz_alarm.timeout) {
+        fuzz_armed_seconds() >= fuzz_alarm.timeout - 1) {
         unsigned input = atomic_load(&fuzz_alarm.input);
         if (atomic_load(&fuzz_alarm.requested) != input) {
             atomic_store(&fuzz_alarm.requested, input);
@@ -274,9 +279,10 @@ static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
         /* Symbolizing takes a moment; a thread that never answers (stuck
          * in the allocator, say) must not hold up the report. */
         for (int i = 0; i < 5000; i++) {
-            if (atomic_load(&fuzz_alarm.done) == input ||
-                !atomic_load(&fuzz_alarm.running))
+            if (atomic_load(&fuzz_alarm.done) == input)
                 break;
+            if (!atomic_load(&fuzz_alarm.running))
+                return;  /* finished meanwhile; the next tick judges the next input */
             struct timespec tick = { 0, 1000 * 1000 };
             nanosleep(&tick, NULL);
         }
@@ -339,6 +345,7 @@ static void *fuzz_r_thread_main(void *unused)
         fuzz_job_t *job = fuzz_r_thread.job;
         pthread_mutex_unlock(&fuzz_r_thread.mutex);
 
+        atomic_store(&fuzz_alarm.running, 1);
         job->fn(job->arg);
         atomic_store(&fuzz_alarm.running, 0);
 
@@ -401,7 +408,6 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
 
     fuzz_job_t job = { fn, arg };
     atomic_fetch_add(&fuzz_alarm.input, 1);
-    atomic_store(&fuzz_alarm.running, 1);
 
     pthread_mutex_lock(&fuzz_r_thread.mutex);
     fuzz_r_thread.job = &job;

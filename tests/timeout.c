@@ -120,6 +120,9 @@ static void block_dump_signal(void *unused)
 static void scenario_slow(void)
 {
     standin_start();
+    /* Ticks while idle, with the clock since idle past the timeout, find
+     * nothing to dump; the input then gets the one dump. */
+    standin_idle(TIMEOUT);
     standin_run("Sys.sleep(60)");
 }
 
@@ -155,6 +158,22 @@ static void scenario_finishes_in_time(void)
 {
     standin_start();
     run_unanswered_within_timeout();
+}
+
+/* A tick just before the deadline starts a wait the input finishes
+ * during, just after the stand-in's deadline: as when the alarm runs
+ * unhindered and finds the input young, nothing is reported. */
+static void scenario_finishes_during_wait(void)
+{
+    standin_start();
+    fuzz_run_on_r_thread(block_dump_signal, NULL);
+
+    struct itimerval timer = {
+        { TIMEOUT / 2 + 1, 0 },
+        { TIMEOUT - 1, 700 * 1000 }  /* 0.7 s in: a tick inside the last second */
+    };
+    assert(setitimer(ITIMER_REAL, &timer, NULL) == 0);
+    standin_run("Sys.sleep(" STR(TIMEOUT) " + 0.3)");
 }
 
 /* The dump left outstanding above is delivered as the next input begins,
@@ -274,6 +293,13 @@ int main(void)
     expect(exited_with(&result, 0), "finishes-in-time: no timeout", &result);
     expect(strstr(result.output, standin) == NULL, "finishes-in-time: no report", &result);
     expect(result.seconds < 2 * TIMEOUT + 1, "finishes-in-time: not held for the wait", &result);
+
+    /* An input finishing during the wait is not blamed for the wait. */
+    run_scenario("finishes-during-wait", scenario_finishes_during_wait, &result);
+    expect(strstr(result.output, header) != NULL, "finishes-during-wait: dump requested", &result);
+    expect(exited_with(&result, 0), "finishes-during-wait: no timeout", &result);
+    expect(strstr(result.output, standin) == NULL, "finishes-during-wait: no report", &result);
+    expect(result.seconds < TIMEOUT + 2, "finishes-during-wait: released at once", &result);
 
     /* A dump outstanding from one input does not serve the next. */
     run_scenario("stale-dump", scenario_stale_dump, &result);
