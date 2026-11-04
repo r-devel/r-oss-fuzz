@@ -237,7 +237,7 @@ static struct {
     struct timespec started;     /* the R thread took the input; libFuzzer's clock started earlier */
     atomic_int running;          /* the R thread is inside an input */
     atomic_int finishing;        /* a held tick saw the input finish */
-    atomic_uint input;           /* numbers the inputs */
+    atomic_uint input;           /* numbers the inputs from 1; 0 is none */
     atomic_uint requested;       /* input whose dump was requested */
     atomic_uint done;            /* input whose dump has been printed */
 } fuzz_alarm = { .timeout = 1200, .poll_ns = 1000 * 1000 };  /* libFuzzer's default */
@@ -286,13 +286,16 @@ static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 
         /* Hold until the input is out of time by its own clock as well;
          * one that finishes first, even in the last sleep, was within
-         * its time. */
+         * its time.  The clock is read before the input is looked at, so
+         * an input seen running was running at a moment past the
+         * timeout, whatever delay falls between the two. */
         for (;;) {
+            long age = fuzz_seconds_since(&fuzz_alarm.started);
             if (!atomic_load(&fuzz_alarm.running)) {
                 atomic_store(&fuzz_alarm.finishing, 1);
                 return;
             }
-            if (fuzz_seconds_since(&fuzz_alarm.started) >= fuzz_alarm.timeout)
+            if (age >= fuzz_alarm.timeout)
                 break;
             nanosleep(&tick, NULL);
         }
@@ -437,7 +440,8 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
     }
 
     fuzz_job_t job = { fn, arg };
-    atomic_fetch_add(&fuzz_alarm.input, 1);
+    if (atomic_fetch_add(&fuzz_alarm.input, 1) + 1 == 0)
+        atomic_fetch_add(&fuzz_alarm.input, 1);  /* wrapped past 0, which is none */
 
     pthread_mutex_lock(&fuzz_r_thread.mutex);
     fuzz_r_thread.job = &job;
