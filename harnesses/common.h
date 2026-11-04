@@ -207,10 +207,13 @@ static struct {
  * its reading of the clock and libFuzzer's; a tick that finds the input
  * younger prints nothing.  An input that finishes during the wait is not
  * handed to libFuzzer at all: by its own clock the input was at most
- * barely out of time, and the wait would be blamed for it.  Inputs are
- * numbered so a dump outstanding from one cannot stand in for the
- * next's, and the R thread itself announces when an input is running, so
- * a tick during the handoff finds nothing to dump.
+ * barely out of time, and the wait would be blamed for it.  What remains
+ * is an input finishing between this handler's last look and libFuzzer's
+ * clock read, the same window libFuzzer itself has between its callback
+ * returning and RunningUserCallback clearing.  Inputs are numbered so a
+ * dump outstanding from one cannot stand in for the next's, and the R
+ * thread itself announces when an input is running, so a tick during the
+ * handoff finds nothing to dump.
  */
 #ifdef SIGRTMIN
 # define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
@@ -279,13 +282,17 @@ static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
         /* Symbolizing takes a moment; a thread that never answers (stuck
          * in the allocator, say) must not hold up the report. */
         for (int i = 0; i < 5000; i++) {
-            if (atomic_load(&fuzz_alarm.done) == input)
-                break;
             if (!atomic_load(&fuzz_alarm.running))
                 return;  /* finished meanwhile; the next tick judges the next input */
+            if (atomic_load(&fuzz_alarm.done) == input)
+                break;
             struct timespec tick = { 0, 1000 * 1000 };
             nanosleep(&tick, NULL);
         }
+
+        /* The input may have finished just as the dump landed. */
+        if (!atomic_load(&fuzz_alarm.running))
+            return;
     }
     fuzz_alarm.chain.sa_sigaction(sig, info, context);
 }

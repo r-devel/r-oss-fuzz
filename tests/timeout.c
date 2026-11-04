@@ -186,6 +186,55 @@ static void scenario_stale_dump(void)
     standin_run("Sys.sleep(60)");
 }
 
+/* The wait loop on its own: a helper thread plays the R thread, landing
+ * the dump 50 ms in and, if asked, finishing the input in the same
+ * breath; the chained handler is a recorder.  No R is needed. */
+static void record_chained(int sig, siginfo_t *info, void *context)
+{
+    (void)sig;
+    (void)info;
+    (void)context;
+    fuzz_write_stderr("CHAINED\n");
+}
+
+static void *land_dump(void *data)
+{
+    int input_finishes = *(int *)data;
+    struct timespec pause = { 0, 50 * 1000 * 1000 };
+    nanosleep(&pause, NULL);
+    atomic_store(&fuzz_alarm.done, atomic_load(&fuzz_alarm.input));
+    if (input_finishes)
+        atomic_store(&fuzz_alarm.running, 0);
+    return NULL;
+}
+
+static void run_wait_loop(int input_finishes)
+{
+    fuzz_alarm.timeout = TIMEOUT;
+    fuzz_alarm.chain.sa_sigaction = record_chained;
+    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.armed);
+    fuzz_alarm.armed.tv_sec -= TIMEOUT;
+    atomic_store(&fuzz_alarm.input, 7);
+    atomic_store(&fuzz_alarm.requested, 7);  /* asked for on an earlier tick */
+    atomic_store(&fuzz_alarm.done, 6);
+    atomic_store(&fuzz_alarm.running, 1);
+
+    pthread_t helper;
+    assert(pthread_create(&helper, NULL, land_dump, &input_finishes) == 0);
+    fuzz_alarm_handler(SIGALRM, NULL, NULL);
+    assert(pthread_join(helper, NULL) == 0);
+}
+
+static void scenario_dump_lands_input_runs(void)
+{
+    run_wait_loop(0);
+}
+
+static void scenario_dump_lands_input_done(void)
+{
+    run_wait_loop(1);
+}
+
 typedef struct {
     int status;
     double seconds;
@@ -300,6 +349,17 @@ int main(void)
     expect(exited_with(&result, 0), "finishes-during-wait: no timeout", &result);
     expect(strstr(result.output, standin) == NULL, "finishes-during-wait: no report", &result);
     expect(result.seconds < TIMEOUT + 2, "finishes-during-wait: released at once", &result);
+
+    /* The wait ends on the dump and chains while the input still runs... */
+    run_scenario("dump-lands-input-runs", scenario_dump_lands_input_runs, &result);
+    expect(exited_with(&result, 0), "dump-lands-input-runs: returned", &result);
+    expect(strstr(result.output, "CHAINED\n") != NULL, "dump-lands-input-runs: chained", &result);
+    expect(result.seconds < 1, "dump-lands-input-runs: on the dump, not the bound", &result);
+
+    /* ...but not when the input finished as the dump landed. */
+    run_scenario("dump-lands-input-done", scenario_dump_lands_input_done, &result);
+    expect(exited_with(&result, 0), "dump-lands-input-done: returned", &result);
+    expect(strstr(result.output, "CHAINED") == NULL, "dump-lands-input-done: not chained", &result);
 
     /* A dump outstanding from one input does not serve the next. */
     run_scenario("stale-dump", scenario_stale_dump, &result);
