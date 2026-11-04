@@ -24,10 +24,12 @@
 #include <limits.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define R_NO_REMAP 1
@@ -184,6 +186,170 @@ static struct {
     .cond = PTHREAD_COND_INITIALIZER
 };
 
+/*
+ * Timeout diagnostics.
+ *
+ * With the alarm confined to the main thread, libFuzzer's timeout report
+ * would show that thread waiting in fuzz_run_on_r_thread and nothing of
+ * where R is.  So once libFuzzer has installed its SIGALRM handler, a
+ * wrapper takes its place: on a tick where libFuzzer may time the input
+ * out, it first signals the R thread, which prints its own stack, and
+ * then hands the alarm on to libFuzzer, which prints its report and
+ * exits.  The wrapper goes in after libFuzzer's startup because libFuzzer
+ * leaves an already-installed SIGALRM handler alone.
+ *
+ * libFuzzer's clock for the input is not visible, but it is bracketed:
+ * it starts after the main thread last went idle (armed) and before the
+ * R thread took the input (started).  Every tick (timeout/2+1 s apart)
+ * comes through here.  One that finds the input within a second of the
+ * timeout by the armed clock, so possibly out of time by libFuzzer's
+ * after whatever delays this handler, holds until the input is out of
+ * time by the started clock too, which means by libFuzzer's as well;
+ * then the dump is requested and waited for, and the tick goes on to
+ * libFuzzer, which reports the timeout.  A tick that finds the input
+ * younger goes straight on, and only one delayed by over a second
+ * between reading the armed clock and libFuzzer reading its own can
+ * still leave a timeout without its dump.  The dump pauses the R
+ * thread, so it is taken only for an input already out of time, never
+ * for one that may still finish.
+ *
+ * An input that finishes while a tick is held is not handed to libFuzzer
+ * at all, nor is any tick that queued up meanwhile: it finished within
+ * its time by its own clock, and the hold would be blamed for it.  Inputs
+ * are numbered so a dump outstanding from one cannot stand in for the
+ * next's, and the R thread itself announces when an input is running, so
+ * a tick during the handoff finds nothing to dump.
+ */
+#ifdef SIGRTMIN
+# define FUZZ_DUMP_SIGNAL SIGRTMIN   /* untouched by libFuzzer, glibc and R */
+#else
+# define FUZZ_DUMP_SIGNAL SIGUSR2    /* macOS: displaces libFuzzer's graceful exit */
+#endif
+
+extern void __sanitizer_print_stack_trace(void) __attribute__((weak));
+
+static struct {
+    int timeout;                 /* -timeout=N, seconds */
+    long poll_ns;                /* between looks while holding or waiting */
+    int wrapped;
+    struct sigaction chain;      /* libFuzzer's SIGALRM action */
+    struct timespec armed;       /* main thread idle; libFuzzer's clock starts later */
+    struct timespec started;     /* the R thread took the input; libFuzzer's clock started earlier */
+    atomic_int running;          /* the R thread is inside an input */
+    atomic_int finishing;        /* a held tick saw the input finish */
+    atomic_uint input;           /* numbers the inputs from 1; 0 is none */
+    atomic_uint requested;       /* input whose dump was requested */
+    atomic_uint done;            /* input whose dump has been printed */
+} fuzz_alarm = { .timeout = 1200, .poll_ns = 1000 * 1000 };  /* libFuzzer's default */
+
+static void fuzz_write_stderr(const char *s)
+{
+    ssize_t rc = write(STDERR_FILENO, s, strlen(s));
+    (void)rc;
+}
+
+/* Runs on the R thread, interrupting whatever the input is doing. */
+static void fuzz_dump_handler(int sig, siginfo_t *info, void *context)
+{
+    (void)sig;
+    (void)info;
+    (void)context;
+    unsigned input = atomic_load(&fuzz_alarm.requested);
+    if (__sanitizer_print_stack_trace)
+        __sanitizer_print_stack_trace();
+    else
+        fuzz_write_stderr("    (no sanitizer runtime to print it)\n");
+    atomic_store(&fuzz_alarm.done, input);
+}
+
+/* Whole seconds since a moment. */
+static long fuzz_seconds_since(const struct timespec *then)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    long seconds = now.tv_sec - then->tv_sec;
+    if (now.tv_nsec < then->tv_nsec)
+        seconds--;
+    return seconds;
+}
+
+/* Runs on the main thread, where libFuzzer's alarm lands. */
+static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
+{
+    if (atomic_load(&fuzz_alarm.finishing))
+        return;
+
+    if (atomic_load(&fuzz_alarm.running) &&
+        fuzz_seconds_since(&fuzz_alarm.armed) >= fuzz_alarm.timeout - 1) {
+        struct timespec tick = { 0, fuzz_alarm.poll_ns };
+
+        /* Hold until the input is out of time by its own clock as well;
+         * one that finishes first, even in the last sleep, was within
+         * its time.  The clock is read before the input is looked at, so
+         * an input seen running was running at a moment past the
+         * timeout, whatever delay falls between the two. */
+        for (;;) {
+            long age = fuzz_seconds_since(&fuzz_alarm.started);
+            if (!atomic_load(&fuzz_alarm.running)) {
+                atomic_store(&fuzz_alarm.finishing, 1);
+                return;
+            }
+            if (age >= fuzz_alarm.timeout)
+                break;
+            nanosleep(&tick, NULL);
+        }
+
+        unsigned input = atomic_load(&fuzz_alarm.input);
+        if (atomic_load(&fuzz_alarm.requested) != input) {
+            atomic_store(&fuzz_alarm.requested, input);
+            fuzz_write_stderr("==fuzz== R thread, where the input is running:\n");
+            if (pthread_kill(fuzz_r_thread.thread, FUZZ_DUMP_SIGNAL) != 0)
+                atomic_store(&fuzz_alarm.done, input);
+        }
+
+        /* Symbolizing takes a moment; a thread that never answers (stuck
+         * in the allocator, say) must not hold up the report, and an
+         * input finishing now is reported all the same: it was out of
+         * time already. */
+        for (int i = 0; i < 5000; i++) {
+            if (atomic_load(&fuzz_alarm.done) == input ||
+                !atomic_load(&fuzz_alarm.running))
+                break;
+            nanosleep(&tick, NULL);
+        }
+    }
+    fuzz_alarm.chain.sa_sigaction(sig, info, context);
+}
+
+/* Wrap libFuzzer's SIGALRM handler, once it exists.  Called before each
+ * input; the first call after libFuzzer's startup sees the handler. */
+static void fuzz_alarm_wrap(void)
+{
+    if (fuzz_alarm.wrapped)
+        return;
+    fuzz_alarm.wrapped = 1;
+
+    struct sigaction current;
+    if (sigaction(SIGALRM, NULL, &current) != 0 ||
+        !(current.sa_flags & SA_SIGINFO) || current.sa_sigaction == NULL)
+        return;  /* no alarm: AFL++'s driver, -timeout=0, tests */
+
+    struct sigaction dump;
+    memset(&dump, 0, sizeof dump);
+    dump.sa_sigaction = fuzz_dump_handler;
+    dump.sa_flags = SA_SIGINFO;
+    sigemptyset(&dump.sa_mask);
+    if (sigaction(FUZZ_DUMP_SIGNAL, &dump, NULL) != 0)
+        return;
+
+    fuzz_alarm.chain = current;
+    struct sigaction wrapper = current;
+    wrapper.sa_sigaction = fuzz_alarm_handler;
+    if (sigaction(SIGALRM, &wrapper, NULL) != 0)
+        sigaction(FUZZ_DUMP_SIGNAL, &(struct sigaction){ .sa_handler = SIG_DFL }, NULL);
+}
+
 static void *fuzz_r_thread_main(void *unused)
 {
     (void)unused;
@@ -197,8 +363,8 @@ static void *fuzz_r_thread_main(void *unused)
     /* libFuzzer's -timeout alarm is acted on only by the thread running
      * its loop (the main thread); delivered here it would be ignored and
      * the input would run on.  Block it so the kernel cannot pick this
-     * thread.  A timeout report therefore shows the main thread waiting
-     * rather than where R is; the testcase it writes still reproduces. */
+     * thread; fuzz_alarm_handler below gets this thread's stack into the
+     * timeout report instead. */
     sigset_t alarm;
     sigemptyset(&alarm);
     sigaddset(&alarm, SIGALRM);
@@ -211,7 +377,10 @@ static void *fuzz_r_thread_main(void *unused)
         fuzz_job_t *job = fuzz_r_thread.job;
         pthread_mutex_unlock(&fuzz_r_thread.mutex);
 
+        clock_gettime(CLOCK_REALTIME, &fuzz_alarm.started);
+        atomic_store(&fuzz_alarm.running, 1);
         job->fn(job->arg);
+        atomic_store(&fuzz_alarm.running, 0);
 
         pthread_mutex_lock(&fuzz_r_thread.mutex);
         fuzz_r_thread.job = NULL;
@@ -271,12 +440,20 @@ static void fuzz_run_on_r_thread(void (*fn)(void *), void *arg)
     }
 
     fuzz_job_t job = { fn, arg };
+    if (atomic_fetch_add(&fuzz_alarm.input, 1) + 1 == 0)
+        atomic_fetch_add(&fuzz_alarm.input, 1);  /* wrapped past 0, which is none */
+
     pthread_mutex_lock(&fuzz_r_thread.mutex);
     fuzz_r_thread.job = &job;
     pthread_cond_broadcast(&fuzz_r_thread.cond);
     while (fuzz_r_thread.job != NULL)
         pthread_cond_wait(&fuzz_r_thread.cond, &fuzz_r_thread.mutex);
     pthread_mutex_unlock(&fuzz_r_thread.mutex);
+
+    /* Idle again: ticks count, and libFuzzer's clock for the next input
+     * starts after this. */
+    atomic_store(&fuzz_alarm.finishing, 0);
+    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.armed);
 }
 
 /*
@@ -604,6 +781,13 @@ static void fuzz_do_target_run(void *data)
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
+    /* libFuzzer parses this itself; the alarm wrapper needs the value. */
+    for (int i = 1; i < *argc; i++) {
+        const char *arg = (*argv)[i];
+        if (strncmp(arg, "-timeout=", 9) == 0)
+            fuzz_alarm.timeout = atoi(arg + 9);
+    }
+
     fuzz_init_job_t job = { argc, argv, 0 };
     fuzz_run_on_r_thread(fuzz_do_target_init, &job);
     return job.result;
@@ -611,6 +795,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
+    fuzz_alarm_wrap();
+
     fuzz_run_job_t job = { data, size, 0 };
     fuzz_run_on_r_thread(fuzz_do_target_run, &job);
     return job.result;

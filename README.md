@@ -27,8 +27,9 @@ patches/          fixes for R defects not yet in trunk, applied to the R source
 instrumentation/  fuzzing-only changes to R (poll intervals, poisoning, aborts)
 ossfuzz.sh        the build script OSS-Fuzz runs
 docs/             notes for a target that needs more than its header comment
-tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c,
-                  built and run by scripts/check-eval.sh against a local R)
+tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c)
+                  and of common.h's timeout diagnostics (tests/timeout.c),
+                  built and run by scripts/check-*.sh against a local R
 .clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
 docker/base/      base image holding a prebuilt, instrumented R
 ```
