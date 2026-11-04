@@ -230,6 +230,7 @@ extern void __sanitizer_print_stack_trace(void) __attribute__((weak));
 
 static struct {
     int timeout;                 /* -timeout=N, seconds */
+    long poll_ns;                /* between looks while holding or waiting */
     int wrapped;
     struct sigaction chain;      /* libFuzzer's SIGALRM action */
     struct timespec armed;       /* main thread idle; libFuzzer's clock starts later */
@@ -239,7 +240,7 @@ static struct {
     atomic_uint input;           /* numbers the inputs */
     atomic_uint requested;       /* input whose dump was requested */
     atomic_uint done;            /* input whose dump has been printed */
-} fuzz_alarm = { .timeout = 1200 };  /* libFuzzer's default */
+} fuzz_alarm = { .timeout = 1200, .poll_ns = 1000 * 1000 };  /* libFuzzer's default */
 
 static void fuzz_write_stderr(const char *s)
 {
@@ -281,15 +282,18 @@ static void fuzz_alarm_handler(int sig, siginfo_t *info, void *context)
 
     if (atomic_load(&fuzz_alarm.running) &&
         fuzz_seconds_since(&fuzz_alarm.armed) >= fuzz_alarm.timeout - 1) {
-        struct timespec tick = { 0, 1000 * 1000 };
+        struct timespec tick = { 0, fuzz_alarm.poll_ns };
 
         /* Hold until the input is out of time by its own clock as well;
-         * one that finishes first was within its time. */
-        while (fuzz_seconds_since(&fuzz_alarm.started) < fuzz_alarm.timeout) {
+         * one that finishes first, even in the last sleep, was within
+         * its time. */
+        for (;;) {
             if (!atomic_load(&fuzz_alarm.running)) {
                 atomic_store(&fuzz_alarm.finishing, 1);
                 return;
             }
+            if (fuzz_seconds_since(&fuzz_alarm.started) >= fuzz_alarm.timeout)
+                break;
             nanosleep(&tick, NULL);
         }
 

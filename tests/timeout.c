@@ -260,9 +260,9 @@ static void scenario_stale_dump(void)
     standin_run("Sys.sleep(60)");
 }
 
-/* The wait loop on its own: a helper thread plays the R thread, landing
- * the dump 50 ms in, or finishing the input instead; the chained handler
- * is a recorder.  No R is needed. */
+/* The handler on its own, from the hold on: a helper thread plays the R
+ * thread, landing the dump or finishing the input after a while; the
+ * chained handler is a recorder.  No R is needed. */
 static void record_chained(int sig, siginfo_t *info, void *context)
 {
     (void)sig;
@@ -271,44 +271,72 @@ static void record_chained(int sig, siginfo_t *info, void *context)
     fuzz_write_stderr("CHAINED\n");
 }
 
-static void *land_dump(void *data)
+typedef struct {
+    double started_ago;      /* the input's age, seconds */
+    long poll_ns;            /* the handler's sleep between looks */
+    int requested_already;   /* the dump was asked for on an earlier tick */
+    int finishes_input;      /* the helper finishes the input, else lands the dump */
+    int after_ms;
+} hold_case_t;
+
+static void *play_r_thread(void *data)
 {
-    int input_finishes = *(int *)data;
-    struct timespec pause = { 0, 50 * 1000 * 1000 };
+    hold_case_t *c = data;
+    struct timespec pause = { 0, c->after_ms * 1000 * 1000 };
     nanosleep(&pause, NULL);
-    if (input_finishes)
+    if (c->finishes_input)
         atomic_store(&fuzz_alarm.running, 0);
     else
         atomic_store(&fuzz_alarm.done, atomic_load(&fuzz_alarm.input));
     return NULL;
 }
 
-static void run_wait_loop(int input_finishes)
+static void run_handler(hold_case_t *c)
 {
     fuzz_alarm.timeout = TIMEOUT;
+    fuzz_alarm.poll_ns = c->poll_ns;
     fuzz_alarm.chain.sa_sigaction = record_chained;
     clock_gettime(CLOCK_REALTIME, &fuzz_alarm.armed);
     fuzz_alarm.armed.tv_sec -= TIMEOUT;
-    fuzz_alarm.started = fuzz_alarm.armed;
+    clock_gettime(CLOCK_REALTIME, &fuzz_alarm.started);
+    fuzz_alarm.started.tv_sec -= (time_t)c->started_ago;
+    fuzz_alarm.started.tv_nsec -= (long)((c->started_ago - (time_t)c->started_ago) * 1e9);
+    if (fuzz_alarm.started.tv_nsec < 0) {
+        fuzz_alarm.started.tv_nsec += 1000000000L;
+        fuzz_alarm.started.tv_sec--;
+    }
     atomic_store(&fuzz_alarm.input, 7);
-    atomic_store(&fuzz_alarm.requested, 7);  /* asked for on an earlier tick */
+    atomic_store(&fuzz_alarm.requested, c->requested_already ? 7 : 6);
     atomic_store(&fuzz_alarm.done, 6);
     atomic_store(&fuzz_alarm.running, 1);
 
     pthread_t helper;
-    assert(pthread_create(&helper, NULL, land_dump, &input_finishes) == 0);
+    assert(pthread_create(&helper, NULL, play_r_thread, c) == 0);
     fuzz_alarm_handler(SIGALRM, NULL, NULL);
     assert(pthread_join(helper, NULL) == 0);
 }
 
+/* Out of time, dump requested earlier: the wait ends on the dump landing. */
 static void scenario_dump_lands(void)
 {
-    run_wait_loop(0);
+    hold_case_t c = { TIMEOUT, 1000 * 1000, 1, 0, 50 };
+    run_handler(&c);
 }
 
+/* Out of time, dump unanswered: the wait ends on the input finishing. */
 static void scenario_input_finishes_unanswered(void)
 {
-    run_wait_loop(1);
+    hold_case_t c = { TIMEOUT, 1000 * 1000, 1, 1, 50 };
+    run_handler(&c);
+}
+
+/* Held 50 ms short of the timeout with 100 ms between looks, the input
+ * finishes 25 ms in: it ends, and the deadline passes, inside the one
+ * sleep.  The input was within its time, so no dump and no report. */
+static void scenario_finishes_in_final_sleep(void)
+{
+    hold_case_t c = { TIMEOUT - 0.05, 100 * 1000 * 1000, 0, 1, 25 };
+    run_handler(&c);
 }
 
 typedef struct {
@@ -458,6 +486,12 @@ int main(void)
     expect(exited_with(&result, 0), "input-finishes-unanswered: returned", &result);
     expect(strstr(result.output, "CHAINED\n") != NULL, "input-finishes-unanswered: chained", &result);
     expect(result.seconds < 1, "input-finishes-unanswered: on the input, not the bound", &result);
+
+    /* An input finishing in the hold's last sleep is not dumped or reported. */
+    run_scenario("finishes-in-final-sleep", scenario_finishes_in_final_sleep, &result);
+    expect(exited_with(&result, 0), "finishes-in-final-sleep: returned", &result);
+    expect(strstr(result.output, header) == NULL, "finishes-in-final-sleep: not dumped", &result);
+    expect(strstr(result.output, "CHAINED") == NULL, "finishes-in-final-sleep: not chained", &result);
 
     /* A dump outstanding from one input does not serve the next. */
     run_scenario("stale-dump", scenario_stale_dump, &result);
