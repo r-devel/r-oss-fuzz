@@ -24,23 +24,77 @@
 #define FUZZ_MAX_INPUT (1024 * 16)
 #define N_CALLS 7
 
+/*
+ * The R sources use raw string literals, a GNU extension that clang (19
+ * and later) and gcc accept in their default gnu C modes.  They are arrays
+ * rather than pointers so the table below can take their addresses in a
+ * static initializer.
+ *
+ * The round-trip and srcref slots run R closures per top-level expression
+ * (the vapply; deparse's useSource path calls as.character() on each
+ * srcref, in both of its passes).  7k one-character expressions in 16 KB
+ * took 27 s on the bots, past libFuzzer's 25 s timeout, without adding
+ * coverage, so both skip inputs with more than 256 expressions.
+ */
+static const char parse_data_source[] = R"(
+function(x) {
+    e <- parse(text = x, keep.source = TRUE)
+    getParseData(e)
+}
+)";
+
+static const char deparse_roundtrip_source[] = R"(
+function(x) {
+    e <- parse(text = x, keep.source = FALSE)
+    if (length(e) > 256L)
+        return(NULL)
+    d <- vapply(as.list(e), function(ex) {
+        paste(deparse(ex, control = "all"), collapse = "\n")
+    }, "")
+    identical(e, parse(text = d, keep.source = FALSE))
+}
+)";
+
+static const char str2lang_source[] = R"(
+function(x) str2lang(x)
+)";
+
+static const char str2expression_source[] = R"(
+function(x) str2expression(x)
+)";
+
+static const char deparse_options_source[] = R"(
+function(x) {
+    e <- parse(text = x, keep.source = FALSE)
+    deparse(
+        e,
+        width.cutoff = 20L,
+        backtick = TRUE,
+        control = c("keepInteger", "quoteExpressions",
+                    "showAttributes", "digits17")
+    )
+}
+)";
+
+static const char deparse_srcref_source[] = R"(
+function(x) {
+    e <- parse(text = x, keep.source = TRUE)
+    if (length(e) > 256L)
+        return(NULL)
+    deparse(e, control = c("useSource", "keepNA", "niceNames"))
+}
+)";
+
 /* Slot 0 is handled in C; sources[0] is a placeholder so slot numbers
  * line up with the table. */
 static const char *const sources[N_CALLS] = {
     NULL,
-    "function(x) { e <- parse(text = x, keep.source = TRUE); "
-    "getParseData(e) }",
-    "function(x) { e <- parse(text = x, keep.source = FALSE); "
-    "d <- vapply(as.list(e), function(ex) "
-    "paste(deparse(ex, control = \"all\"), collapse = \"\\n\"), \"\"); "
-    "identical(e, parse(text = d, keep.source = FALSE)) }",
-    "function(x) str2lang(x)",
-    "function(x) str2expression(x)",
-    "function(x) deparse(parse(text = x, keep.source = FALSE), "
-    "width.cutoff = 20L, backtick = TRUE, control = c(\"keepInteger\", "
-    "\"quoteExpressions\", \"showAttributes\", \"digits17\"))",
-    "function(x) deparse(parse(text = x, keep.source = TRUE), "
-    "control = c(\"useSource\", \"keepNA\", \"niceNames\"))",
+    parse_data_source,
+    deparse_roundtrip_source,
+    str2lang_source,
+    str2expression_source,
+    deparse_options_source,
+    deparse_srcref_source,
 };
 
 static SEXP x_str;
