@@ -24,6 +24,13 @@
 #define FUZZ_MAX_INPUT (1024 * 16)
 #define N_CALLS 7
 
+/* Slots 2 and 6 run R closures per top-level expression (the vapply;
+ * deparse's useSource path calls as.character() on each srcref, in both
+ * of its passes).  7k one-character expressions in 16 KB took 27 s on
+ * the bots, past libFuzzer's 25 s timeout, without adding coverage, so
+ * these slots skip inputs with more expressions than this. */
+#define MAX_EXPRS "256L"
+
 /* Slot 0 is handled in C; sources[0] is a placeholder so slot numbers
  * line up with the table. */
 static const char *const sources[N_CALLS] = {
@@ -31,6 +38,7 @@ static const char *const sources[N_CALLS] = {
     "function(x) { e <- parse(text = x, keep.source = TRUE); "
     "getParseData(e) }",
     "function(x) { e <- parse(text = x, keep.source = FALSE); "
+    "if (length(e) > " MAX_EXPRS ") return(NULL); "
     "d <- vapply(as.list(e), function(ex) "
     "paste(deparse(ex, control = \"all\"), collapse = \"\\n\"), \"\"); "
     "identical(e, parse(text = d, keep.source = FALSE)) }",
@@ -39,8 +47,9 @@ static const char *const sources[N_CALLS] = {
     "function(x) deparse(parse(text = x, keep.source = FALSE), "
     "width.cutoff = 20L, backtick = TRUE, control = c(\"keepInteger\", "
     "\"quoteExpressions\", \"showAttributes\", \"digits17\"))",
-    "function(x) deparse(parse(text = x, keep.source = TRUE), "
-    "control = c(\"useSource\", \"keepNA\", \"niceNames\"))",
+    "function(x) { e <- parse(text = x, keep.source = TRUE); "
+    "if (length(e) > " MAX_EXPRS ") return(NULL); "
+    "deparse(e, control = c(\"useSource\", \"keepNA\", \"niceNames\")) }",
 };
 
 static SEXP x_str;
