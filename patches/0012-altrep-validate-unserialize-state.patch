@@ -53,8 +53,8 @@ of bounds or crash).  The upstream PR also adds a regression test
 Found by fuzzing R with libFuzzer and AFL + AddressSanitizer (unserialize
 target).
 
-Upstream status: r-devel/r-svn PR #336; R Bugzilla bug 19047 (attachment
-3842, compact sequences only).
+Upstream status: r-devel/r-svn PR #336; R Bugzilla bug 19287 (attachment
+4010), superseding attachment 3842 on the closed bug 19047.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
 as already-applied in the meantime, which is harmless).
 
