@@ -143,6 +143,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang2(wrapper, x_str));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: prime the parser's internal state so early iterations
      * don't diverge from later ones. */
     {

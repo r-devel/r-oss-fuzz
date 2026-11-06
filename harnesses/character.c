@@ -290,6 +290,7 @@ int fuzz_target_init(int *argc, char ***argv)
 
     if (k != N_CALLS)
         abort();
+    fuzz_label_calls(calls, N_CALLS);
 
     SET_STRING_ELT(input_string, 0, Rf_mkChar("fuzz"));
     SET_STRING_ELT(input_utf8, 0, Rf_mkCharCE("fuzz", CE_UTF8));

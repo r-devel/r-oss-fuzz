@@ -216,6 +216,7 @@ int fuzz_target_init(int *argc, char ***argv)
 
     if (k != N_CALLS)
         abort();
+    fuzz_label_calls(calls, N_CALLS);
 
     const char *utf8_locale = find_utf8_locale();
     if (utf8_locale != NULL) {

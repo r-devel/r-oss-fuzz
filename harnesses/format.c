@@ -157,6 +157,7 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang6(wrapper, input_string, digits, width,
                                        nsmall, flag));
     }
+    fuzz_label_calls(calls, N_CALLS);
     SET_STRING_ELT(input_string, 0, Rf_mkChar("1.5 2 3"));
     return 0;
 }

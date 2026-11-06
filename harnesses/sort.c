@@ -154,6 +154,7 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(wrapper = fuzz_make_wrapper(sources[i]));
         Rf_protect(calls[i] = Rf_lang2(wrapper, placeholder));
     }
+    fuzz_label_calls(calls, N_CALLS);
     return 0;
 }
 

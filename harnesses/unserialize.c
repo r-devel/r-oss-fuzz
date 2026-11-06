@@ -74,6 +74,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang2(wrapper, Rf_allocVector(RAWSXP, 1)));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: serialize(NULL, NULL) to get a valid RDS blob, then
      * round-trip it through every route to prime the code paths. */
     {

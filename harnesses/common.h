@@ -9,6 +9,7 @@
  *   fuzz_set_string_ce()     - Stage a string with an explicit encoding mark
  *   fuzz_set_raw_arg()       - Stage a raw-vector input likewise
  *   fuzz_make_wrapper()      - Parse an R closure that implements a call slot
+ *   fuzz_label_calls()       - Name a target's call slots in timeout dumps
  *   fuzz_scratch_file()      - Per-process temp file for path-only entry points
  *   fuzz_write_scratch()     - Rewrite that file with the current input
  *   fuzz_repeat_product_excessive() - Guard against TRE repeat blowup
@@ -248,6 +249,126 @@ static void fuzz_write_stderr(const char *s)
     (void)rc;
 }
 
+/*
+ * Slot labels for the timeout dump.
+ *
+ * The R thread's stack is mostly the byte-code interpreter, which says
+ * little about which of a target's calls was running.  A harness
+ * registers its calls once with fuzz_label_calls(), which deparses each
+ * while its placeholders still hold their initial values, and the dump
+ * prints the one last entered by fuzz_eval_silent() or fuzz_do_eval() in
+ * the current input.  Harnesses that evaluate a registered call another
+ * way note it with fuzz_label_enter().  The text is formatted up front,
+ * so the dump handler only writes it.
+ */
+#define FUZZ_MAX_LABELS 128
+#define FUZZ_LABEL_MAX 4096
+
+static struct {
+    SEXP call;
+    char *text;
+} fuzz_labels[FUZZ_MAX_LABELS];
+static int fuzz_n_labels;
+static atomic_int fuzz_label_current = -1;  /* index into fuzz_labels */
+
+typedef struct {
+    SEXP call;
+    char *buf;      /* FUZZ_LABEL_MAX bytes, holding the header */
+    size_t len;
+} fuzz_deparse_job_t;
+
+/* Append one deparsed line, indented; false if it does not fit with
+ * room left for the closing "...". */
+static int fuzz_label_append_line(fuzz_deparse_job_t *job, const char *line)
+{
+    size_t n = strlen(line);
+    if (job->len + 4 + n + 1 >= FUZZ_LABEL_MAX - sizeof "    ...\n")
+        return 0;
+    memcpy(job->buf + job->len, "    ", 4);
+    memcpy(job->buf + job->len + 4, line, n);
+    job->buf[job->len + 4 + n] = '\n';
+    job->len += 4 + n + 1;
+    job->buf[job->len] = '\0';
+    return 1;
+}
+
+static void fuzz_do_deparse(void *data)
+{
+    fuzz_deparse_job_t *job = data;
+    SEXP quoted, expr, lines;
+    Rf_protect(quoted = Rf_lang2(R_QuoteSymbol, job->call));
+    Rf_protect(expr = Rf_lang2(Rf_install("deparse"), quoted));
+    Rf_protect(lines = Rf_eval(expr, R_BaseEnv));
+    for (R_xlen_t i = 0; i < XLENGTH(lines); i++) {
+        if (!fuzz_label_append_line(job, CHAR(STRING_ELT(lines, i)))) {
+            memcpy(job->buf + job->len, "    ...\n", sizeof "    ...\n");
+            break;
+        }
+    }
+    Rf_unprotect(3);
+}
+
+static void fuzz_label_call(SEXP call, int slot, int n_slots)
+{
+    if (call == NULL || call == R_NilValue)
+        return;
+
+    /* A call shared by several slots (run under different settings, say)
+     * keeps one label naming them all. */
+    for (int i = 0; i < fuzz_n_labels; i++) {
+        if (fuzz_labels[i].call != call)
+            continue;
+        char *old = fuzz_labels[i].text;
+        char *of = strstr(old, " of ");  /* "==fuzz== slot 7 of 9:" */
+        size_t size = strlen(old) + 32;
+        char *buf = malloc(size);
+        if (of == NULL || buf == NULL) {
+            free(buf);
+            return;
+        }
+        snprintf(buf, size, "%.*s, %d%s", (int)(of - old), old, slot, of);
+        fuzz_labels[i].text = buf;
+        free(old);
+        return;
+    }
+    if (fuzz_n_labels == FUZZ_MAX_LABELS)
+        return;
+
+    char *buf = malloc(FUZZ_LABEL_MAX);
+    if (buf == NULL)
+        return;
+    int n = snprintf(buf, FUZZ_LABEL_MAX, "==fuzz== slot %d of %d:\n", slot, n_slots);
+
+    /* A failed deparse leaves the header alone. */
+    fuzz_deparse_job_t job = { call, buf, (size_t)n };
+    R_ToplevelExec(fuzz_do_deparse, &job);
+
+    fuzz_labels[fuzz_n_labels].call = call;
+    fuzz_labels[fuzz_n_labels].text = buf;
+    fuzz_n_labels++;
+}
+
+/* Label calls[0..n-1] as slots 0..n-1; NULL entries (slots run in C)
+ * are skipped. */
+static void fuzz_label_calls(const SEXP *calls, int n)
+{
+    for (int i = 0; i < n; i++)
+        fuzz_label_call(calls[i], i, n);
+}
+
+/* Note the call about to be evaluated; an unregistered one clears it. */
+static void fuzz_label_enter(SEXP call)
+{
+    int found = -1;
+    for (int i = 0; i < fuzz_n_labels; i++) {
+        if (fuzz_labels[i].call == call) {
+            found = i;
+            break;
+        }
+    }
+    atomic_store(&fuzz_label_current, found);
+}
+
 /* Runs on the R thread, interrupting whatever the input is doing. */
 static void fuzz_dump_handler(int sig, siginfo_t *info, void *context)
 {
@@ -255,6 +376,9 @@ static void fuzz_dump_handler(int sig, siginfo_t *info, void *context)
     (void)info;
     (void)context;
     unsigned input = atomic_load(&fuzz_alarm.requested);
+    int label = atomic_load(&fuzz_label_current);
+    if (label >= 0)
+        fuzz_write_stderr(fuzz_labels[label].text);
     if (__sanitizer_print_stack_trace)
         __sanitizer_print_stack_trace();
     else
@@ -531,6 +655,7 @@ typedef struct {
 static void fuzz_do_eval(void *data)
 {
     fuzz_eval_data_t *ed = (fuzz_eval_data_t *)data;
+    fuzz_label_enter(ed->call);
     Rf_eval(ed->call, ed->env);
 }
 
@@ -539,6 +664,7 @@ static void fuzz_do_eval(void *data)
 static void fuzz_eval_silent(SEXP call, SEXP env)
 {
     int error = 0;
+    fuzz_label_enter(call);
     R_tryEvalSilent(call, env, &error);
 }
 
@@ -776,7 +902,9 @@ typedef struct {
 static void fuzz_do_target_run(void *data)
 {
     fuzz_run_job_t *job = data;
+    atomic_store(&fuzz_label_current, -1);
     job->result = fuzz_target_run(job->data, job->size);
+    atomic_store(&fuzz_label_current, -1);
 }
 
 int LLVMFuzzerInitialize(int *argc, char ***argv)

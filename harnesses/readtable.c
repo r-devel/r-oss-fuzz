@@ -91,6 +91,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang2(wrapper, x_text));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: load utils and prime read.table's method dispatch. */
     SET_STRING_ELT(x_text, 0, Rf_mkChar("a,b,c\n1,2,x\n4,NA,\"y\"\n"));
     for (int i = 0; i < N_CALLS; i++)

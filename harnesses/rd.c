@@ -40,6 +40,7 @@ int fuzz_target_init(int *argc, char ***argv)
     Rf_protect(true_value = Rf_ScalarLogical(TRUE));
     Rf_protect(calls[0] = Rf_lang3(wrapper, input_string, false_value));
     Rf_protect(calls[1] = Rf_lang3(wrapper, input_string, true_value));
+    fuzz_label_calls(calls, 2);
     return 0;
 }
 
