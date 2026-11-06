@@ -192,6 +192,7 @@ int fuzz_target_init(int *argc, char ***argv)
     Rf_protect(calls[n++] = Rf_lang3(w_write, placeholder, path));
     if (n != N_CALLS)
         abort();
+    fuzz_label_calls(calls, N_CALLS);
     return 0;
 }
 

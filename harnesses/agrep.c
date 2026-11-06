@@ -59,6 +59,8 @@ int fuzz_target_init(int *argc, char ***argv)
     Rf_protect(calls[2] = Rf_lang4(sym_agrep, x_pat, x, false_val));
     SET_TAG(CDDDR(calls[2]), Rf_install("fixed"));
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: prime TRE's approximate-matching engine. */
     {
         int error = 0;

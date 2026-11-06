@@ -47,6 +47,8 @@ int fuzz_target_init(int *argc, char ***argv)
     Rf_protect(calls[3] = Rf_lang3(sym_type_convert, x_str, true_val));
     SET_TAG(CDDR(calls[3]), Rf_install("as.is"));
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: prime coercion code paths. */
     {
         int error = 0;

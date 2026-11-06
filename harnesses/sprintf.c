@@ -28,6 +28,7 @@ int fuzz_target_init(int *argc, char ***argv)
     Rf_protect(calls[1] = Rf_lang3(sprintf, format, integer));
     Rf_protect(calls[2] = Rf_lang3(sprintf, format, real));
     Rf_protect(calls[3] = Rf_lang5(sprintf, format, integer, real, string));
+    fuzz_label_calls(calls, N_CALLS);
     SET_STRING_ELT(format, 0, Rf_mkChar("%s"));
     return 0;
 }

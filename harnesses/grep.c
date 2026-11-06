@@ -71,6 +71,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang3(wrapper, x_pat, x));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: prime regex engine state before fuzzing. */
     SET_STRING_ELT(x_pat, 0, Rf_mkChar("(o)"));
     for (int i = 0; i < N_CALLS; i++)

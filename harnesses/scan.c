@@ -74,6 +74,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang2(wrapper, x_text));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: prime scan's type-dispatch and locale state. */
     SET_STRING_ELT(x_text, 0, Rf_mkChar("1,2,3\n4,5,6\n"));
     for (int i = 0; i < N_CALLS; i++)

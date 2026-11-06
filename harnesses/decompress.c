@@ -49,6 +49,8 @@ int fuzz_target_init(int *argc, char ***argv)
         SET_TAG(CDDR(calls[i]), Rf_install("type"));
     }
 
+    fuzz_label_calls(calls, 4);
+
     /* Warmup: a minimal gzip stream (1f 8b header + empty deflate). */
     {
         int error = 0;

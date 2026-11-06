@@ -62,14 +62,17 @@ static void run_io(void *data)
     memcpy(RAW(raw), input->data, input->size);
     SETCADR(read_calls[input->selected], raw);
 
+    fuzz_label_enter(read_calls[input->selected]);
     value = R_tryEvalSilent(read_calls[input->selected], R_GlobalEnv, &error);
     if (!error) {
         SETCADR(write_calls[input->selected], value);
+        fuzz_label_enter(write_calls[input->selected]);
         encoded = R_tryEvalSilent(write_calls[input->selected], R_GlobalEnv,
                                   &error);
     }
     if (!error) {
         SETCADR(read_calls[input->selected], encoded);
+        fuzz_label_enter(read_calls[input->selected]);
         roundtrip = R_tryEvalSilent(read_calls[input->selected], R_GlobalEnv,
                                     &error);
     }
@@ -132,6 +135,13 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(wrapper = fuzz_make_wrapper(wrap_sources[i]));
         Rf_protect(wrap_calls[i] = Rf_lang2(wrapper, placeholder));
     }
+
+    for (int i = 0; i < N_BIN; i++) {
+        fuzz_label_call(read_calls[i], i, N_CALLS);
+        fuzz_label_call(write_calls[i], i, N_CALLS);
+    }
+    for (int i = 0; i < N_WRAP; i++)
+        fuzz_label_call(wrap_calls[i], N_BIN + i, N_CALLS);
     return 0;
 }
 

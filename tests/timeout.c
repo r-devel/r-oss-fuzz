@@ -26,11 +26,24 @@ static void set_dump_signal(int how)
     pthread_sigmask(how, &set, NULL);
 }
 
+/* A registered call, shared by two slots, that the input "LABELED" runs. */
+static SEXP labeled_call;
+
 int fuzz_target_init(int *argc, char ***argv)
 {
     (void)argc;
     (void)argv;
     fuzz_init_r();
+
+    SEXP text, exprs;
+    ParseStatus status;
+    Rf_protect(text = Rf_mkString("Sys.sleep(60)"));
+    Rf_protect(exprs = R_ParseVector(text, -1, &status, R_NilValue));
+    assert(status == PARSE_OK);
+    R_PreserveObject(labeled_call = VECTOR_ELT(exprs, 0));
+    Rf_unprotect(2);
+    fuzz_label_call(labeled_call, 2, 6);
+    fuzz_label_call(labeled_call, 5, 6);
     return 0;
 }
 
@@ -39,6 +52,11 @@ int fuzz_target_run(const uint8_t *data, size_t size)
     if (unblock_on_next_input) {
         unblock_on_next_input = 0;
         set_dump_signal(SIG_UNBLOCK);
+    }
+
+    if (strcmp((const char *)data, "LABELED") == 0) {
+        fuzz_eval_silent(labeled_call, R_GlobalEnv);
+        return 0;
     }
 
     SEXP text, exprs;
@@ -237,6 +255,13 @@ static void scenario_slow_dump_finishes_in_time(void)
     standin_run("Sys.sleep(" STR(TIMEOUT) " - 0.1)");
 }
 
+/* A registered call times out: its slots and source precede the frames. */
+static void scenario_labeled(void)
+{
+    standin_start();
+    standin_run("LABELED");
+}
+
 /* The slow dump still comes, in full, for an input that times out. */
 static void scenario_slow_dump_times_out(void)
 {
@@ -426,6 +451,16 @@ int main(void)
     expect(report != NULL && report > dump, "slow: report follows the dump", &result);
     expect_frames(dump, "slow: R thread frames printed", &result);
     expect(strstr(dump + 1, header) == NULL, "slow: dumped once", &result);
+    expect(strstr(result.output, "==fuzz== slot") == NULL, "slow: no slot for an unregistered call", &result);
+
+    /* A registered call: its label, then the frames. */
+    run_scenario("labeled", scenario_labeled, &result);
+    expect(exited_with(&result, TIMEOUT_EXIT), "labeled: chained to the alarm", &result);
+    dump = strstr(result.output, header);
+    const char *label = dump == NULL ? NULL :
+        strstr(dump, "==fuzz== slot 2, 5 of 6:\n    Sys.sleep(60)\n");
+    expect(label != NULL, "labeled: slots and source printed after the header", &result);
+    expect_frames(label, "labeled: frames follow the label", &result);
 
     /* Fast inputs under alarm ticks: nothing. */
     run_scenario("fast", scenario_fast, &result);

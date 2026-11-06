@@ -101,6 +101,8 @@ int fuzz_target_init(int *argc, char ***argv)
         Rf_protect(calls[i] = Rf_lang2(wrapper, x_text));
     }
 
+    fuzz_label_calls(calls, N_CALLS);
+
     /* Warmup: load grDevices and the colour name table. */
     SET_STRING_ELT(x_text, 0, Rf_mkChar("red\n#FF000080\n3\n0.5\ntransparent"));
     for (int i = 0; i < N_CALLS; i++)

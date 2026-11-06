@@ -140,6 +140,10 @@ The build is convention-driven — there is no per-target wiring in
    and define `fuzz_target_init` and `fuzz_target_run`, which take the
    `LLVMFuzzerInitialize` / `LLVMFuzzerTestOneInput` signatures (the header
    defines those two and runs the harness's functions on the R thread).
+   Once the slot calls are built, and before anything stages input into
+   their placeholders, register them with `fuzz_label_calls(calls,
+   N_CALLS)`: a timeout report then names the slot that was running and
+   prints its call.
 2. Optionally add, all keyed on the same `<name>` stem:
    - `dictionaries/<name>.dict`
    - `options/<name>.options`
