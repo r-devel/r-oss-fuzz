@@ -1,0 +1,141 @@
+Reject a malformed serialized state when unserializing any of the base
+ALTREP classes (compact sequences, wrappers, deferred strings, mmap), so
+unserialize() stops reading out of bounds or dereferencing a non-pointer
+on a crafted stream.
+
+The Unserialize methods in src/main/altclasses.c rebuild an object from
+its serialized state without checking its shape, and ReadItem() hands
+them whatever object the stream supplied.
+
+compact_intseq_Unserialize() and compact_realseq_Unserialize() read
+state[0], state[1] and state[2] of what should be a length-3 numeric
+vector (length, first value, increment); a short vector makes the [1]/[2]
+reads run off its end, and a non-vector state makes REAL0/INTEGER0 form
+an invalid data pointer.
+
+    ==254==ERROR: AddressSanitizer: heap-buffer-overflow READ of size 4
+        #0 compact_intseq_Unserialize      altclasses.c:91
+        #1 altrep_UnserializeEX_default    altrep.c:694
+        #2 ReadItem_Recursive              serialize.c:1925
+        #3 R_Unserialize                   serialize.c:2300
+
+oss-fuzz testcase 5857824396345344 supplies a length-1 integer state, so
+reading the increment at index 2 is the overflow above; a second input
+5360206129987584 null-dereferences at altclasses.c:89.  Whether the read
+faults depends on heap layout (a length-1 integer state shares a vector
+node with slack), so it is not caught on every build.
+
+wrapper_Unserialize(), deferred_string_Unserialize() and
+mmap_Unserialize() take the state apart with CAR/CDR and INTEGER():
+CONS(wrapped, meta) with a length-2 integer meta, CONS(arg, info) with an
+integer info, and list3(file, sizes, info) with a length-4 integer info.
+CAR of an external pointer is its (NULL) address and CAR of a plain
+vector is its length, and a short meta or info is read past its end
+later.
+
+    ==15462==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000
+        #0 TYPEOF                          memory.c:3935
+        #1 make_wrapper                    altclasses.c:1972
+        #2 altrep_UnserializeEX_default    altrep.c:793
+        #3 ReadItem_Recursive              serialize.c:1938
+
+oss-fuzz testcase 6358277886377984 (afl_r_unserialize, readRDS() on a
+rawConnection) is a wrap_real object whose state is an external pointer;
+it also seg.faults R 4.6.1, as do a plain-vector wrapper state and a
+compact-sequence mmap state.
+
+Validate the state in all five methods and raise a clean R error for a
+malformed one.  unserialize()/readRDS() of untrusted data is documented
+as unsafe, so this is a robustness fix (fail cleanly rather than read out
+of bounds or crash).  The upstream PR also adds a regression test
+(tests/reg-tests-1e.R), not carried here.
+
+Found by fuzzing R with libFuzzer and AFL + AddressSanitizer (unserialize
+target).
+
+Upstream status: r-devel/r-svn PR #336; R Bugzilla bug 19287 (attachment
+4010), superseding attachment 3842 on the closed bug 19047.
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report it
+as already-applied in the meantime, which is harmless).
+
+diff --git a/src/main/altclasses.c b/src/main/altclasses.c
+index b852c5f108..29ce49983d 100644
+--- a/src/main/altclasses.c
++++ b/src/main/altclasses.c
+@@ -86,6 +86,15 @@ static SEXP new_compact_realseq(R_xlen_t, double, double);
+ 
+ static SEXP compact_intseq_Unserialize(SEXP class, SEXP state)
+ {
++    /* state is the serialized info vector (see compact_intseq_Serialized_state):
++       a numeric vector of length 3.  A crafted serialized stream can supply
++       any object here, so reject a malformed state with a clean error rather
++       than reading REAL0/INTEGER0 off the end of a short or wrong-typed
++       (or non-vector) object. */
++    if ((TYPEOF(state) != REALSXP && TYPEOF(state) != INTSXP) ||
++	XLENGTH(state) < 3)
++	error("invalid compact_intseq serialized state");
++
+     R_xlen_t n = COMPACT_INTSEQ_SERIALIZED_STATE_LENGTH(state);
+     int n1 = COMPACT_INTSEQ_SERIALIZED_STATE_FIRST(state);
+     int inc = COMPACT_INTSEQ_SERIALIZED_STATE_INCR(state);
+@@ -363,6 +372,12 @@ static SEXP compact_realseq_Serialized_state(SEXP x)
+ 
+ static SEXP compact_realseq_Unserialize(SEXP class, SEXP state)
+ {
++    /* as for compact_intseq_Unserialize: the info vector read below is a
++       length-3 REALSXP, but a crafted stream can supply anything, so reject
++       a malformed state rather than reading REAL0 off the end. */
++    if (TYPEOF(state) != REALSXP || XLENGTH(state) < 3)
++	error("invalid compact_realseq serialized state");
++
+     double inc = COMPACT_REALSEQ_INFO_INCR(state);
+     R_xlen_t len = COMPACT_REALSEQ_INFO_LENGTH(state);
+     double n1 = COMPACT_REALSEQ_INFO_FIRST(state);
+@@ -656,6 +671,14 @@ static SEXP deferred_string_Serialized_state(SEXP x)
+ 
+ static SEXP deferred_string_Unserialize(SEXP class, SEXP state)
+ {
++    /* state is CONS(arg, info) with info an integer vector holding
++       scipen, but a crafted serialized stream can supply any object.
++       R_deferred_coerceToString checks the type of arg. */
++    if (TYPEOF(state) != LISTSXP ||
++	TYPEOF(DEFERRED_STRING_STATE_INFO(state)) != INTSXP ||
++	XLENGTH(DEFERRED_STRING_STATE_INFO(state)) < 1)
++	error("invalid deferred string serialized state");
++
+     SEXP arg = DEFERRED_STRING_STATE_ARG(state);
+     SEXP info = DEFERRED_STRING_STATE_INFO(state);
+     return R_deferred_coerceToString(arg, info);
+@@ -1107,6 +1130,17 @@ static SEXP mmap_file(SEXP, int, Rboolean, Rboolean, Rboolean, Rboolean);
+ 
+ static SEXP mmap_Unserialize(SEXP class, SEXP state)
+ {
++    /* state is list3(file, sizes, info) (see make_mmap_state), but a
++       crafted serialized stream can supply any object. */
++    if (TYPEOF(state) != LISTSXP ||
++	TYPEOF(CDR(state)) != LISTSXP ||
++	TYPEOF(CDDR(state)) != LISTSXP ||
++	TYPEOF(MMAP_STATE_FILE(state)) != STRSXP ||
++	XLENGTH(MMAP_STATE_FILE(state)) < 1 ||
++	TYPEOF(CADDR(state)) != INTSXP ||
++	XLENGTH(CADDR(state)) < 4)
++	error("invalid mmap serialized state");
++
+     SEXP file = MMAP_STATE_FILE(state);
+     int type = MMAP_STATE_TYPE(state);
+     Rboolean ptrOK = (Rboolean) MMAP_STATE_PTROK(state);
+@@ -1514,6 +1548,14 @@ static SEXP make_wrapper(SEXP, SEXP);
+ 
+ static SEXP wrapper_Unserialize(SEXP class, SEXP state)
+ {
++    /* state is CONS(wrapped, meta) with meta an integer vector of length
++       NMETA, but a crafted serialized stream can supply any object: CAR
++       of an external pointer is its (NULL) address, and CAR of a vector
++       is its length.  make_wrapper checks the type of the wrapped value. */
++    if (TYPEOF(state) != LISTSXP || TYPEOF(CDR(state)) != INTSXP ||
++	XLENGTH(CDR(state)) < NMETA)
++	error("invalid wrapper serialized state");
++
+     return make_wrapper(CAR(state), CDR(state));
+ }
+ 
