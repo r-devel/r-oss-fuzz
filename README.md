@@ -29,7 +29,10 @@ ossfuzz.sh        the build script OSS-Fuzz runs
 docs/             notes for a target that needs more than its header comment
 tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c)
                   and of common.h's timeout diagnostics (tests/timeout.c),
-                  built and run by scripts/check-*.sh against a local R
+                  built and run by scripts/check-*.sh against a local R;
+                  scripts/ossfuzz-status.py summarizes the targets' recent
+                  OSS-Fuzz sessions and the open testcases (needs an
+                  oss-fuzz.com session cookie, see its header)
 .clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
 docker/base/      base image holding a prebuilt, instrumented R
 ```
