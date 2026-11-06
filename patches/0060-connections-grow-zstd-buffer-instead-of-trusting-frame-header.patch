@@ -1,0 +1,67 @@
+Grow memDecompress()'s zstd output buffer as the data is decoded
+instead of sizing it from the frame header.
+
+do_memDecompress() (src/main/connections.c) sized the zstd output
+buffer from ZSTD_getFrameContentSize() on the first frame and
+decompressed in one call.  That size comes from the input and is not
+checked against the data, so a 10-byte truncated frame claiming
+3.96 GiB made R allocate 3.96 GiB before zstd reported "Src size is
+incorrect", and input with more than one frame (valid zstd, e.g.
+concatenated .zst files) failed with "Destination buffer is too small".
+Start no larger than 3 * the input size, as the gzip, bzip2 and xz
+branches do, and retry with a doubled buffer on
+ZSTD_error_dstSize_tooSmall, which zstd reports only when the decoded
+data overflows the buffer (a lying header gives "Data corruption
+detected").  Each attempt starts afresh, so the previous buffer is
+released with vmaxset().
+
+Found by OSS-Fuzz (libFuzzer_r_decompress): testcase 5388943009579008,
+a reproducible Out-of-memory (malloc of 4.2 GB against the 2560 MB
+limit) on an 11-byte input reaching zstd through type = "unknown".
+The path became reachable when trunk started requiring libzstd
+(r90802, built from source here since PR #83).
+
+Upstream status: r-devel/r-svn PR #455, filed 2026-11-05 (no Bugzilla report).  The upstream PR also adds a
+regression test to tests/reg-tests-1e.R, left out here so this carry
+patch does not go stale with that file.
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/connections.c b/src/main/connections.c
+index 25b4bd92ec..21dd031720 100644
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -2413,6 +2413,7 @@ static unsigned long long ZSTD_decompressBound(const void* src, size_t srcSize)
+ #endif
+ 
+ #include <zstd.h>
++#include <zstd_errors.h> /* ZSTD_getErrorCode; older zstd.h lacks it */
+ 
+ typedef struct zstdfileconn {
+     FILE *fp;
+@@ -7490,8 +7491,24 @@ do_memDecompress(SEXP call, SEXP op, SEXP args, SEXP env)
+ 	    outlen = ZSTD_decompressBound(p, inlen);
+ 	if (outlen == ZSTD_CONTENTSIZE_ERROR)
+ 	    error("internal error in memDecompress(%s)", "type = \"zstd\"");
+-	buf = (Bytef *) R_alloc(outlen, sizeof(Bytef));
+-	res = ZSTD_decompress(buf, outlen, p, inlen);
++	/* The size in the frame header is not checked against the data and
++	   covers only the first frame, so start no larger than the other
++	   types do and grow the buffer when the output does not fit.  Each
++	   attempt starts afresh, so the previous buffer can be released. */
++	if (outlen > 3*inlen)
++	    outlen = 3*inlen;
++	const void *vmax = vmaxget();
++	while(1) {
++	    vmaxset(vmax);
++	    buf = (Bytef *) R_alloc(outlen, sizeof(Bytef));
++	    res = ZSTD_decompress(buf, outlen, p, inlen);
++	    if (ZSTD_getErrorCode(res) == ZSTD_error_dstSize_tooSmall
++		&& outlen < SIZE_MAX/2) {
++		outlen = (outlen < 3*inlen) ? 3*inlen : 2*outlen;
++		continue;
++	    }
++	    break;
++	}
+ 	if (ZSTD_isError(res))
+ 	    error("internal error in memDecompress(%s)", ZSTD_getErrorName(res));
+ 	ans = allocVector(RAWSXP, res);
