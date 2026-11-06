@@ -26,7 +26,13 @@ static SEXP write_calls[N_BIN];
 static SEXP wrap_calls[N_WRAP];
 
 /* Connections are closed on exit from each closure: a read error must
- * not leak one of R's 128 connection slots across iterations. */
+ * not leak one of R's 128 connection slots across iterations.
+ *
+ * readLines() runs with warn = FALSE, as in the connections and zip
+ * targets: it warns once per line holding an embedded nul, and every
+ * warning goes through the R-level .signalSimpleWarning() even under
+ * options(warn = -1), so a 64KB input of "\0\n" lines spent over 25 s
+ * signalling warnings on the bots. */
 static const char *const wrap_sources[N_WRAP] = {
     "function(x) readChar(x, c(1L, 5L, 16L, 64L), useBytes = TRUE)",
     "function(x) readChar(x, c(1L, 5L, 16L, 64L))",
@@ -42,7 +48,8 @@ static const char *const wrap_sources[N_WRAP] = {
     "function(x) readBin(x, \"integer\", n = 16384L, size = 1L, signed = TRUE)",
     "function(x) { con <- rawConnection(x); on.exit(close(con)); seek(con, 3L); "
     "readBin(con, \"double\", n = 16384L, size = 4L, endian = \"big\") }",
-    "function(x) { con <- rawConnection(x); on.exit(close(con)); readLines(con) }",
+    "function(x) { con <- rawConnection(x); on.exit(close(con)); "
+    "readLines(con, warn = FALSE) }",
     "function(x) { con <- rawConnection(x); on.exit(close(con)); "
     "readBin(con, \"numeric\", n = 16384L, endian = \"swap\") }",
 };
