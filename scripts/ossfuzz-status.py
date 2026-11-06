@@ -8,6 +8,18 @@ ending in timeouts or out-of-memory exits is finding something (or
 wasting most of its time) long before ClusterFuzz files a testcase,
 since all of a target's timeouts collapse into one.
 
+The window is whole UTC days ending yesterday: ClusterFuzz publishes a
+day's statistics only after it ends, and asks for today alone answer
+404.  Columns:
+
+    fuzz%     share of the expected session time actually spent fuzzing
+    timeout%, oom%, leak%, crash%
+              share of sessions that ended that way
+    new       crash signatures first seen in the window
+    edges     edge coverage from the daily coverage job, not from these
+              sessions; R's startup alone reaches most of it, so compare
+              targets against the lowest one rather than against zero
+
 The data comes from the JSON endpoints behind the ClusterFuzz dashboard
 pages (Fuzzer Statistics, Testcases), which need a logged-in session:
 the value of the oss-fuzz.com "session" cookie, read from
@@ -26,6 +38,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -129,16 +142,22 @@ def target_name(fuzzer):
 
 def load_stats(cookie, token, engine, date_start, date_end):
     fuzzer, job = JOBS[engine]
-    data = request_json(cookie, "/fuzzer-stats/load", {
-        "project": PROJECT,
-        "fuzzer": fuzzer,
-        "job": job,
-        "group_by": "by-fuzzer",
-        "date_start": date_start.isoformat(),
-        "date_end": date_end.isoformat(),
-        "csrf_token": token,
-    })
-    cols = {c["label"]: i for i, c in enumerate(data.get("cols", []))}
+    try:
+        data = request_json(cookie, "/fuzzer-stats/load", {
+            "project": PROJECT,
+            "fuzzer": fuzzer,
+            "job": job,
+            "group_by": "by-fuzzer",
+            "date_start": date_start.isoformat(),
+            "date_end": date_end.isoformat(),
+            "csrf_token": token,
+        })
+    except urllib.error.HTTPError as e:
+        # A range ClusterFuzz has not published yet answers 404.
+        if e.code == 404:
+            return []
+        raise
+    cols ={c["label"]: i for i, c in enumerate(data.get("cols", []))}
 
     rows = []
     for row in data.get("rows", []):
@@ -186,8 +205,8 @@ def print_table(header, rows, right):
 
 
 def print_stats(rows, engine, date_start, date_end):
-    print(f"{JOBS[engine][1]}, {date_start} to {date_end} "
-          f"(percent of fuzzing sessions ending each way)")
+    print(f"{JOBS[engine][1]}, {date_start} to {date_end} UTC "
+          f"(fuzz%: time spent fuzzing; other %: sessions ending that way)")
     if not rows:
         print("  no statistics for this range")
         return
@@ -200,14 +219,21 @@ def print_stats(rows, engine, date_start, date_end):
         table.append([
             r["target"], f"{r['exec_per_sec']:.1f}",
             percent(r["fuzzing_time"]), percent(r["timeout"]),
-            percent(r["oom"]), percent(r["crash"]),
+            percent(r["oom"]), percent(r["leak"]), percent(r["crash"]),
             r["new_crashes"], r["edges"], ", ".join(flags(r)),
         ])
     print_table(
-        ["target", "exec/s", "fuzz%", "timeout%", "oom%", "crash%", "new",
-         "edges", "flags"],
-        table, right={1, 2, 3, 4, 5, 6, 7},
+        ["target", "exec/s", "fuzz%", "timeout%", "oom%", "leak%", "crash%",
+         "new", "edges", "flags"],
+        table, right={1, 2, 3, 4, 5, 6, 7, 8},
     )
+
+    covered = [(float(str(r["edges"]).rstrip("%")), r["target"])
+               for r in rows if re.fullmatch(r"[0-9.]+%", str(r["edges"]))]
+    if covered:
+        low, target = min(covered)
+        print(f"edges come from the daily coverage job and are mostly R "
+              f"startup; the lowest is {target} at {low:.2f}%")
 
 
 def load_testcases(cookie, token):
@@ -287,15 +313,18 @@ def print_testcases(cookie, token):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Summarize the r project's state on OSS-Fuzz.")
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--days", type=int, default=2,
-                        help="days of statistics, ending today (default 2)")
+                        help="days of statistics, ending yesterday (UTC) "
+                             "(default 2)")
     parser.add_argument("--engine", choices=sorted(JOBS), default="libfuzzer")
     parser.add_argument("--no-testcases", action="store_true",
                         help="skip the open testcases")
     args = parser.parse_args()
 
-    date_end = datetime.datetime.now(datetime.timezone.utc).date()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    date_end = today - datetime.timedelta(days=1)
     date_start = date_end - datetime.timedelta(days=max(args.days, 1) - 1)
 
     try:
