@@ -45,9 +45,10 @@ static const char *strptime_formats[N_FORMATS] = {
 #define N_FMT_CALLS 8
 #define N_CALLS (N_FIXED_CALLS + N_FMT_CALLS)
 
-/* Slots from this index on run with a UTF-8 LC_CTYPE so R_strptime takes
- * its wide-character path (w_strptime_internal), which is otherwise
- * unreachable from a C-locale fuzzer. */
+/* Slots from this index on run with a UTF-8 LC_CTYPE and the others with
+ * C, whatever locale the runner starts in, so R_strptime takes its
+ * wide-character path (w_strptime_internal) here and its narrow one
+ * (strptime_internal) everywhere else. */
 #define FIRST_UTF8_CALL (N_CALLS - 2)
 
 #define DEFAULT_FORMAT "%Y-%m-%d %H:%M:%OS"
@@ -58,14 +59,20 @@ static SEXP calls[N_CALLS];
 
 static SEXP call_ctype_utf8;
 static SEXP call_ctype_c;
-static int ctype_is_utf8 = 0;
+
+/* -1 until set_ctype first runs: R starts in the runner's own locale
+ * (UTF-8 on the OSS-Fuzz bots), which may match neither setting. */
+static int ctype_is_utf8 = -1;
 
 /* Pick a UTF-8 locale this runner has.  Returns NULL when none exists,
- * in which case the UTF-8 slots simply run in the C locale. */
+ * in which case the UTF-8 slots simply run in the C locale.  The probe
+ * puts LC_CTYPE back as it found it: R picks the strptime path from its
+ * own cached view of the locale, which only Sys.setlocale updates. */
 static const char *find_utf8_locale(void)
 {
     static const char *const candidates[] = { "C.UTF-8", "en_US.UTF-8", NULL };
     const char *found = NULL;
+    char *saved = strdup(setlocale(LC_CTYPE, NULL));
 
     for (int i = 0; candidates[i] != NULL; i++) {
         if (setlocale(LC_CTYPE, candidates[i]) != NULL) {
@@ -73,7 +80,9 @@ static const char *find_utf8_locale(void)
             break;
         }
     }
-    setlocale(LC_CTYPE, "C");
+
+    setlocale(LC_CTYPE, saved);
+    free(saved);
     return found;
 }
 
@@ -89,7 +98,9 @@ static SEXP make_setlocale_call(const char *name)
  * is cheap but not free, and consecutive inputs usually share a slot. */
 static void set_ctype(int want_utf8)
 {
-    if (call_ctype_utf8 == NULL || want_utf8 == ctype_is_utf8)
+    if (call_ctype_utf8 == NULL)
+        want_utf8 = 0;
+    if (want_utf8 == ctype_is_utf8)
         return;
 
     fuzz_eval_silent(want_utf8 ? call_ctype_utf8 : call_ctype_c, R_GlobalEnv);
@@ -219,17 +230,17 @@ int fuzz_target_init(int *argc, char ***argv)
     fuzz_label_calls(calls, N_CALLS);
 
     const char *utf8_locale = find_utf8_locale();
-    if (utf8_locale != NULL) {
+    if (utf8_locale != NULL)
         call_ctype_utf8 = make_setlocale_call(utf8_locale);
-        call_ctype_c = make_setlocale_call("C");
-    }
+    call_ctype_c = make_setlocale_call("C");
 
-    /* Warmup: prime datetime internals. */
+    /* Warmup: prime datetime internals, each slot in its own locale. */
     {
         int error = 0;
         SET_STRING_ELT(x_str, 0, Rf_mkChar("2024-01-15 12:30:00"));
         SET_STRING_ELT(fmt_str, 0, Rf_mkChar(DEFAULT_FORMAT));
         for (int i = 0; i < N_CALLS; i++) {
+            set_ctype(i >= FIRST_UTF8_CALL);
             R_tryEval(calls[i], R_GlobalEnv, &error);
             error = 0;
         }
