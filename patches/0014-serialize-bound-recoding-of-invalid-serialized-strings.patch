@@ -32,8 +32,8 @@ Found by fuzzing R with libFuzzer + AddressSanitizer (OSS-Fuzz
 unserialize target, testcase 5161193048965120, reproducible).  A
 30-byte ASCII-format stream is enough to trigger it.
 
-Upstream status: reported on R Bugzilla bug 19047 (comment 6,
-attachment 3851) with this fix attached (also r-devel/r-svn PR #339).
+Upstream status: r-devel/r-svn PR #339; R Bugzilla bug 19288 (attachment
+4013), superseding attachment 3851 on the closed bug 19047.
 The upstream patch also adds a regression test to tests/reg-tests-1b.R,
 left out here so this carry patch does not go stale with that file.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
