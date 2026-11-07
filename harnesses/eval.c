@@ -53,8 +53,7 @@
 /* The allowlist frame, the wrappers frame below it, and compiler::compile. */
 static SEXP eval_builtins, eval_wrappers, eval_compile_fn;
 
-/* Remaining interrupt checks for the current input; 0 means no limit, which
- * is also how eval_compile pauses the count. */
+/* Remaining interrupt checks for the current input; 0 means no limit. */
 static long eval_budget;
 static clock_t eval_cpu_start;
 
@@ -334,18 +333,26 @@ static const char *const eval_warmup_source =
     "g <- function(...) list(...)\n"
     "g(x, repeat break)\n";
 
-/* Byte-code for expr, or expr itself if the compiler declined it. */
+/* Byte-code for expr, or expr itself if the compiler declined it.
+ *
+ * The compiler is R code and runs under the input's budget like the code
+ * it produces.  It used to run with the budget paused, bounded only by
+ * the parsed-tree limits, but its cost is not linear in the tree: constant
+ * folding re-walks every subtree at each level of nesting, so an
+ * expression nested 62 calls deep compiles in about a second under ASAN
+ * and four of them (270 bytes, within the tree limits) in over four,
+ * which on the bots was the 25 s libFuzzer timeout.  A compile the
+ * budget cuts off leaves eval_budget at zero; the caller stops the input
+ * there rather than running the expression uncompiled.
+ */
 static SEXP eval_compile(SEXP expr, SEXP env)
 {
     SEXP quoted, call, code;
     int error = 0;
-    long budget = eval_budget;
 
     Rf_protect(quoted = Rf_lang2(R_QuoteSymbol, expr));
     Rf_protect(call = Rf_lang3(eval_compile_fn, quoted, env));
-    eval_budget = 0;
     code = R_tryEvalSilent(call, R_BaseEnv, &error);
-    eval_budget = budget;
     Rf_unprotect(2);
 
     return error ? expr : code;
@@ -377,6 +384,12 @@ static SEXP eval_source(const eval_input_t *input, int *error)
     for (R_xlen_t i = 0; i < XLENGTH(parsed); i++) {
         SEXP code;
         Rf_protect(code = eval_compile(VECTOR_ELT(parsed, i), env));
+        if (eval_budget == 0) {
+            /* The compiler used up the budget or the CPU limit. */
+            *error = 1;
+            Rf_unprotect(1);
+            break;
+        }
         result = R_tryEvalSilent(code, env, error);
         Rf_unprotect(1);
         if (*error)

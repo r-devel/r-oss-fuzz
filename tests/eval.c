@@ -175,6 +175,20 @@ static void run_checks(void *unused)
     for (int i = 0; i < 3; i++)
         check("x <- 0; for (i in 1:20000) x <- x + 1; x", 0, 20000);
 
+    /* The compiler runs under the budget too.  Its constant folding is
+     * quadratic in nesting depth: a chain of 62 unary pluses costs about
+     * 20000 interrupt checks to compile (one second under ASAN), so four
+     * of them, within the tree limits, used to run for several seconds
+     * with the budget paused.  Now the budget ends the input inside the
+     * compiler, and a shallower chain still compiles and runs. */
+    char chain[128], chains_source[640];
+    snprintf(chain, sizeof(chain), "x%.*sy\n", 62, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
+    snprintf(chains_source, sizeof(chains_source), "x <- 1; y <- 2\n%s%s%s%s", chain, chain, chain, chain);
+    for (int i = 0; i < 2; i++) {
+        check(chains_source, 1, 0);
+        check("x <- 1; y <- 2; x++++++++++++++++++++y", 0, 3);
+    }
+
     /* `:` is a length-capped wrapper: long compact sequences are refused
      * before a reduction can walk them, short ones behave as usual, and
      * the wrapper's private environment stays out of reach. */
