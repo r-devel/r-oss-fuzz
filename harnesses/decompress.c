@@ -13,11 +13,16 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Legitimate small inputs expand past 1GB here (a 64KB bzip2 stream of
- * zeros decompresses to ~1.25GB, and memDecompress keeps its doubling
- * retries live on the R_alloc stack), so the shared 1Gb default would
- * cut off exactly the buffer-sizing paths this target exists to cover. */
-#define FUZZ_R_MAX_VSIZE "4Gb"
+/* The default 1Gb vector limit stays.  memDecompress keeps every
+ * doubling retry live on the R_alloc stack and then copies the result
+ * into a RAWSXP, so a stream expanding to N bytes holds about 3N: a 64KB
+ * bzip2 stream of zeros (1.25GB) needs ~3.75GB.  Raising the limit to
+ * 4Gb once covered that, but ClusterFuzz runs with -rss_limit_mb=2560,
+ * so such inputs were killed as out-of-memory (most decompress sessions
+ * in early November 2026) rather than ending in R's clean "cannot
+ * allocate" error.  The sizing paths past 2.5GB are unreachable on the
+ * bots either way; under 1Gb every retry is exercised for outputs up
+ * to roughly 250MB (measured with bzip2 streams of zeros). */
 
 #include "common.h"
 
