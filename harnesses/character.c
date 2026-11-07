@@ -47,15 +47,20 @@
  * table, 340 MB and a 17 s sort under ASAN (64 s on the bot).  A spec's
  * cost is linear in the size it declares, so refuse one whose entries,
  * counted the way do_chartr() parses ranges, exceed FUZZ_MAX_CHARTR_TABLE.
- * The count is taken on a lenient UTF-8 decode; R rejects what it cannot
- * decode before expanding anything.
+ * The count is taken on a lenient UTF-8 decode that also accepts the
+ * withdrawn RFC 2279 5- and 6-byte forms: glibc's mbstowcs() still does,
+ * so a native-encoded spec can name a code point up to 0x7FFFFFFF and
+ * "W-\xfc\x84\xbb\xb3\xbb\x80" is an 83-million-entry range (patches/0049
+ * only validates UTF-8-marked specs).  Decoding the lead byte as a 4-byte
+ * form counted that range as 1.07 million.
  */
 #define FUZZ_MAX_CHARTR_TABLE 2000000.0
 
 static size_t fuzz_decode_utf8(const unsigned char *p, unsigned int *cp)
 {
     unsigned int c = p[0];
-    size_t len = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+    size_t len = c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : c < 0xf8 ? 4
+        : c < 0xfc ? 5 : 6;
     unsigned int v = len == 1 ? c : c & (0x7f >> len);
     for (size_t i = 1; i < len; i++) {
         if ((p[i] & 0xc0) != 0x80) {
