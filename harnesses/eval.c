@@ -50,10 +50,6 @@
  * budget's unit of work is too coarse; see eval_poll_budget. */
 #define FUZZ_EVAL_CPU_LIMIT 1.0
 
-/* Interrupt checks the code run by the unwind itself (on.exit expressions)
- * gets after the budget is spent, per expression; see eval_poll_budget. */
-#define FUZZ_EVAL_GRACE 1000
-
 /* The allowlist frame, the wrappers frame below it, compiler::compile, and
  * the closure that puts the allowlist frame's attributes back, with the
  * attributes it puts back. */
@@ -62,8 +58,6 @@ static SEXP eval_reset_builtins_fn, eval_builtins_attributes;
 
 /* Remaining interrupt checks for the current input; 0 means no limit. */
 static long eval_budget;
-/* Set once the budget or the CPU limit has ended the current input. */
-static int eval_exhausted;
 static clock_t eval_cpu_start;
 
 /* Only primitives: importing a base closure would also import its enclosing
@@ -85,8 +79,14 @@ static const char *const eval_primitives[] = {
     "is.infinite", "as.integer", "as.double", "as.logical", "as.character",
     "as.complex", "as.raw", "abs", "sqrt", "floor", "ceiling", "trunc",
     "sum", "prod", "min", "max", "any", "all", "invisible",
-    /* Language objects, argument introspection, switch and on.exit. */
-    "quote", "substitute", "missing", "nargs", "switch", "on.exit",
+    /* Language objects, argument introspection and switch.  Not on.exit:
+     * its code runs during the unwind the budget error starts, and
+     * on.exit(return(1)) redirects that unwind back into the function, so
+     * `h <- function() { on.exit(return(1)); repeat {} }; repeat h()` would
+     * swallow every budget error and never end.  Letting it in needs a
+     * way to end an input that R code cannot redirect, which is an
+     * instrumentation/ change to R_run_onexits, not an allowlist entry. */
+    "quote", "substitute", "missing", "nargs", "switch",
     /* Attributes other than class; see the wrappers for `attr<-`. */
     "attr", "attributes", "names", "names<-", "dim", "dim<-", "dimnames",
     "dimnames<-", "levels<-", "unclass", "class", "oldClass",
@@ -125,20 +125,25 @@ static const char *const eval_primitives[] = {
  * are capped on the result instead: building it is free, and its length
  * is known before anything walks it.
  *
- * `attr<-` and `attributes<-` refuse the class attribute.  An object with
- * a class attribute dispatches every internal generic in the allowlist
+ * `attr<-` and `attributes<-` refuse two things.  The class attribute: an
+ * object with one dispatches every internal generic in the allowlist
  * (`[`, `+`, `length`, `c`, ...) to the S3 methods base registers for its
  * classes -- `[.data.frame`, `Ops.Date`, `$.DLLInfo` -- which are closures
  * over the base namespace running on input-shaped data, and a crash in
  * one of them on `class(x) <- "DLLInfo"` is the "you asked for it" report
  * this target is meant not to produce.  UseMethod dispatches on the
  * implicit class (matrix, integer, function, ...) to methods the input
- * defines, which is the dispatch code this allowlist is for.
+ * defines, which is the dispatch code this allowlist is for.  And
+ * environments: UseMethod hands the method .GenericDefEnv, which is the
+ * allowlist frame itself, whose bindings are locked but whose attributes
+ * are not (see eval_reset_builtins).  The other setters in the allowlist
+ * either reject environments (names<-, dim<-, dimnames<-) or set only
+ * their own attribute (levels<-).
  */
 static const char *const eval_wrapper_primitives[] = {
-    "function", "{", "if", "&&", ">=", ">", "==", "-", "<-", "length", "[[",
-    "as.double", "is.finite", "abs", "is.character", "is.na", "!", "any",
-    "names", ".Internal"
+    "function", "{", "if", "&&", "||", ">=", ">", "==", "-", "<-", "length",
+    "[[", "as.double", "is.finite", "abs", "is.character", "is.na", "!",
+    "any", "names", "is.environment", ".Internal"
 };
 
 static const char eval_colon_source[] = R"(
@@ -173,6 +178,8 @@ function(...) {
 
 static const char eval_attr_set_source[] = R"(
 function(x, which, value) {
+    if (is.environment(x))
+        .Internal(stop(TRUE, "attributes of environments cannot be set in the eval target"))
     if (is.character(which) && length(which) == 1L && !is.na(which) &&
         which == "class")
         .Internal(stop(TRUE, "the class attribute is not available in the eval target"))
@@ -182,6 +189,8 @@ function(x, which, value) {
 
 static const char eval_attributes_set_source[] = R"(
 function(x, value) {
+    if (is.environment(x))
+        .Internal(stop(TRUE, "attributes of environments cannot be set in the eval target"))
     if (any(names(value) == "class"))
         .Internal(stop(TRUE, "the class attribute is not available in the eval target"))
     .attributes_set(x, value)
@@ -238,45 +247,39 @@ typedef struct {
  *
  * The error unwinds to R_tryEvalSilent like any other R error.  Raising it
  * from inside R_ProcessEvents is what R_CheckTimeLimits does, so the
- * interpreter is prepared for a longjmp at this point.
- *
- * The unwind runs the on.exit expressions of every frame it leaves, and
- * those are input code: `on.exit(repeat {})` would run forever if the
- * check switched itself off once spent (setTimeLimit() has exactly that
- * gap in plain R).  So the count is reloaded with a small grace instead,
- * and the CPU backstop keeps measuring from the start of the input.  Each
- * on.exit expression gets at most FUZZ_EVAL_GRACE checks, or one check
- * once the CPU limit has passed, before it is cut off in turn; R drops an
- * expression that errors and carries on with the rest of the unwind
- * (R_run_onexits), so the cascade is bounded by the number of on.exit
- * expressions and the total by the CPU limit.  The grace also covers the
- * few checks the error path itself can make, since deparsing the call for
- * the message polls through instrumentation/0005.
+ * interpreter is prepared for a longjmp at this point.  The budget is
+ * zero by the time either error is raised, which switches the check off,
+ * so nothing on the error path can re-enter it.  No input code runs once
+ * the error is raised: there are no handlers or on.exit in the allowlist,
+ * and that is a condition of this design (see eval_primitives).
  */
 static void eval_poll_budget(void)
 {
     if (eval_budget <= 0)
         return;
 
-    int over_cpu =
-        (double)(clock() - eval_cpu_start) / CLOCKS_PER_SEC > FUZZ_EVAL_CPU_LIMIT;
-    if (--eval_budget > 0 && !over_cpu)
-        return;
+    if (--eval_budget == 0)
+        Rf_error("evaluation budget exhausted");
 
-    eval_exhausted = 1;
-    eval_budget = FUZZ_EVAL_GRACE;
-    if (over_cpu)
+    if ((double)(clock() - eval_cpu_start) / CLOCKS_PER_SEC > FUZZ_EVAL_CPU_LIMIT) {
+        eval_budget = 0;
         Rf_error("evaluation CPU limit exhausted");
-    Rf_error("evaluation budget exhausted");
+    }
 }
 
 /* UseMethod() binds .GenericDefEnv in the method's frame to the top
  * environment of the generic's enclosure, which here is the allowlist frame
- * itself.  Its bindings are locked, but attributes are not bindings:
- * `attr(.GenericDefEnv, "name") <- "x"` would take away the name the
- * compiler keys on, and anything set there would outlive the input.  So the
- * frame's attributes are put back after every input, and before it in case
- * the last one left by a jump.  (.GenericCallEnv is the caller's frame, the
+ * itself.  Its bindings are locked, but attributes are not bindings.  Two
+ * things keep that harmless.  The wrappers for attr<- and attributes<-
+ * refuse environments, so the input cannot take away the frame's name,
+ * which topenv() would otherwise stop recognising -- it then falls back to
+ * R_GlobalEnv, and UseMethod's method lookup from there reaches base's own
+ * S3 methods (with.default evaluates its argument with the whole of base
+ * in scope).  And the frame carries a locked .packageName binding, which
+ * topenv() accepts on its own, so recognition never rests on an attribute
+ * at all.  What is left is levels<-, which can hang a heap-sized attribute
+ * on the frame that would outlive the input; so the attributes are put
+ * back after every input.  (.GenericCallEnv is the caller's frame, the
  * input's own.)  Through R, since the attribute list is not reachable from
  * the public API; in two steps with a preserved value, so that nothing is
  * allocated while an attribute the input left may be filling the heap. */
@@ -294,6 +297,12 @@ static void eval_reset_builtins(void)
                                eval_builtins_attributes));
     Rf_eval(call, R_BaseEnv);
     Rf_unprotect(1);
+}
+
+static void eval_reset_builtins_exec(void *unused)
+{
+    (void)unused;
+    eval_reset_builtins();
 }
 
 /* The allowlist is only ever primitives (see eval_primitives): a name that
@@ -461,7 +470,7 @@ x[[2]] <- x[1]
 g <- function(...) list(...)
 g(x, repeat break)
 h <- function(x) UseMethod("h")
-h.default <- function(x) { on.exit(nargs()); switch(class(x), numeric = 1, 2) }
+h.default <- function(x) switch(class(x), numeric = nargs(), 2)
 h.function <- function(x) attr(unclass(x), "srcref")
 h(x); h(g)
 y <- seq_len(3); names(y) <- c("a", "b", "c"); dim(y) <- 3L; y[[2L]]
@@ -512,15 +521,13 @@ static SEXP eval_source(const eval_input_t *input, int *error)
     }
 
     /* One budget covers all top-level expressions of an input. */
-    eval_reset_builtins();
     Rf_protect(env = R_NewEnv(eval_wrappers, TRUE, 29));
     eval_cpu_start = clock();
-    eval_exhausted = 0;
     eval_budget = FUZZ_EVAL_BUDGET;
     for (R_xlen_t i = 0; i < XLENGTH(parsed); i++) {
         SEXP code;
         Rf_protect(code = eval_compile(VECTOR_ELT(parsed, i), env));
-        if (eval_exhausted) {
+        if (eval_budget == 0) {
             /* The compiler used up the budget or the CPU limit. */
             *error = 1;
             Rf_unprotect(1);
@@ -547,9 +554,11 @@ static void eval_one(void *data)
 static void eval_run(const uint8_t *data, size_t size)
 {
     eval_input_t input = { data, size };
-    R_ToplevelExec(eval_one, &input);
-    /* A jump past eval_source (an interrupt, not an error) skips its reset. */
-    eval_budget = 0;
+    /* A jump past eval_source (an interrupt, not an error) skips its resets. */
+    if (!R_ToplevelExec(eval_one, &input)) {
+        eval_budget = 0;
+        R_ToplevelExec(eval_reset_builtins_exec, NULL);
+    }
 }
 
 int fuzz_target_init(int *argc, char ***argv)
@@ -572,6 +581,9 @@ int fuzz_target_init(int *argc, char ***argv)
     eval_reset_builtins();
     eval_import_primitives(eval_builtins, eval_primitives,
                            sizeof(eval_primitives) / sizeof(*eval_primitives));
+    /* topenv() recognises a frame by this binding as well as by its name
+     * attribute; the binding is the one the input cannot touch. */
+    Rf_defineVar(Rf_install(".packageName"), Rf_mkString("base"), eval_builtins);
     R_LockEnvironment(eval_builtins, TRUE);
 
     Rf_protect(eval_wrappers = R_NewEnv(eval_builtins, TRUE, 29));

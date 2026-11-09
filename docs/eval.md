@@ -20,7 +20,7 @@ logical operators, `c`, `list`, the three subsetting operators and their
 replacement forms, the `is.*`/`as.*` predicates and coercions, a few
 elementwise maths functions, `sum`/`prod`/`min`/`max`/`any`/`all`, and
 `invisible`. Since 2026-11 it also holds `quote`, `substitute`, `missing`,
-`nargs`, `switch` and `on.exit`; the attribute accessors `attr`,
+`nargs` and `switch`; the attribute accessors `attr`,
 `attributes`, `names`, `dim`, `dimnames`, `class`, `oldClass` and `unclass`
 with the setters for names, dim, dimnames and levels; `UseMethod`; and
 `rep` and `seq_along`. Its parent is `emptyenv()`. The harness checks at
@@ -49,16 +49,26 @@ data, where a crash on `class(x) <- "DLLInfo"` is the "you asked for it"
 report this target is meant not to produce, and which would need their own
 look at what they hand back to the input. `UseMethod` dispatches on the
 implicit class instead (`matrix`, `integer`, `function`, ...), to methods
-the input defines, which is the dispatch code the allowlist is for. The
-method sees `.GenericDefEnv`, the top environment of the generic's
-enclosure, which here is the allowlist frame itself: its bindings are
-locked, but its attributes are not, so the harness puts them back after
-every input (one of them is the name the compiler keys on, below).
+the input defines, which is the dispatch code the allowlist is for.
+
+The method sees `.GenericDefEnv`, the top environment of the generic's
+enclosure, which here is the allowlist frame itself. Its bindings are
+locked, but attributes are not bindings, and the frame's name attribute is
+what `topenv()` recognises it by: with the name gone, `topenv()` falls back
+to the global environment, and `UseMethod`'s lookup from there reaches
+base's own S3 methods (`with.default` evaluates its argument with all of
+base in scope). So the two wrappers also refuse environments, the other
+setters in the allowlist either reject environments or set only their own
+attribute, and the frame carries a locked `.packageName` binding, which
+`topenv()` accepts on its own, so recognition never rests on an attribute.
+What is left is `levels<-`, which can hang a heap-sized attribute on the
+frame that would outlive the input, so the harness puts the frame's
+attributes back after every input.
 
 There are no bindings for filesystem, network or process access, `.Internal`,
 `.Call` and friends, namespace or package loading, `eval`, environment
-accessors or `<<-`, class setters, `NextMethod` or S4 dispatch, `options`,
-or time limits. Language objects from `quote` and `substitute` are inert
+accessors or `<<-`, class setters, `on.exit`, `NextMethod` or S4 dispatch,
+`options`, or time limits. Language objects from `quote` and `substitute` are inert
 without `eval`. These are capability restrictions, not a denylist over the
 source text: `base::system` fails because `::` is unbound. Closures the
 input defines inherit the restricted environment, and primitive names can
@@ -136,7 +146,6 @@ internals before fuzzing begins, so every input sees the same R.
 | compilation | the input's budget and CPU backstop, like execution | the same hook; `eval_source` ends the input |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
-| unwinding | 1000 further checks per `on.exit` expression, under the same CPU backstop | the same hook |
 | recursion | R's `expressions` limit and C stack check, against the R thread's 1 GiB stack | R; an ordinary R error |
 
 The execution budget is counted in work, not time. R calls
@@ -177,18 +186,17 @@ With all three, the worst inputs found so far (`repeat !x` over a 4 MB
 vector, `repeat as.character(x)` over 100k doubles) end in under half a
 second under ASAN.
 
-The budget error unwinds through the `on.exit` expressions of every frame
-it leaves, and those are input code. A check that switched itself off once
-spent would let `on.exit(repeat {})` run forever; `setTimeLimit()` has
-exactly that gap in plain R. So the count is reloaded with a grace of 1000
-checks instead, and the CPU backstop keeps measuring from the start of the
-input. Each `on.exit` expression gets at most that grace, or a single check
-once the CPU limit has passed, before it is cut off in turn; R drops an
-expression that errors and carries on with the rest of the unwind, so a
-frame with two such expressions, 200 nested frames with one each, or an
-`on.exit` that calls back into the function all end as errors, in under a
-second under ASAN. The grace also covers the few checks the error path
-itself can make while deparsing the call for the message.
+The budget error ends the input only because no input code runs once it
+is raised: the check switches itself off, and nothing in the allowlist can
+intercept the unwind. That is why `on.exit` is not in it. Its expressions
+would run during the unwind with the check off, so `on.exit(repeat {})`
+would run until libFuzzer's timeout (`setTimeLimit()` has exactly this gap
+in plain R), and reloading the check with a grace does not help, because
+`on.exit(return(1))` redirects the unwind back into the function:
+`h <- function() { on.exit(return(1)); repeat {} }; repeat h()` swallows
+every budget error and never ends. Ending such an input needs a path R
+code cannot redirect, which means a fuzzing-only change to
+`R_run_onexits` under `instrumentation/`, not an allowlist entry.
 
 The budget cannot see C loops that never poll, which is why `:`, `seq_len`
 and `seq.int` are capped; nothing else in the allowlist builds a long
@@ -246,19 +254,23 @@ allowlist widens in tiers, each once the target has run quietly on the one
 before:
 
 1. **Inert language objects, attributes and dispatch** (done, 2026-11):
-   `quote`, `substitute`, `missing`, `nargs`, `switch`, `on.exit`, `rep`,
-   `seq_len`, `seq.int`, `seq_along`, the attribute accessors and setters
-   other than class, and `UseMethod`. Language objects are inert without
-   `eval`; attributes exercise `attrib.c` and the dim/names handling in
-   `subset.c` and `subassign.c`; `UseMethod` on the implicit class
-   exercises `objects.c` with methods the input defines. `all(quote(x))`
-   is in this tier. What it deliberately leaves out is the class
-   attribute: `class<-`, `oldClass<-`, and `attr<-`/`attributes<-` for
-   `"class"`. A classed object dispatches the internal generics to base's
-   own S3 methods, which are closures over the base namespace, so letting
-   it in means deciding that a crash in `[.data.frame` on a number wearing
-   the class is a report worth filing, and checking what those methods can
-   hand back to the input. That is the next decision, not an oversight.
+   `quote`, `substitute`, `missing`, `nargs`, `switch`, `rep`, `seq_len`,
+   `seq.int`, `seq_along`, the attribute accessors and setters other than
+   class, and `UseMethod`. Language objects are inert without `eval`;
+   attributes exercise `attrib.c` and the dim/names handling in `subset.c`
+   and `subassign.c`; `UseMethod` on the implicit class exercises
+   `objects.c` with methods the input defines. `all(quote(x))` is in this
+   tier. Two things it deliberately leaves out. The class attribute:
+   `class<-`, `oldClass<-`, and `attr<-`/`attributes<-` for `"class"`. A
+   classed object dispatches the internal generics to base's own S3
+   methods, which are closures over the base namespace, so letting it in
+   means deciding that a crash in `[.data.frame` on a number wearing the
+   class is a report worth filing, and checking what those methods can
+   hand back to the input. And `on.exit`, which can redirect the budget's
+   unwind (see Limits) and so needs a fuzzing-only change to
+   `R_run_onexits` that lets the harness drop pending handlers once an
+   input is over its budget. Both are decisions still to make, not
+   oversights.
 2. **Every remaining computational primitive**: the full `names.c` table
    minus the capability set (`.Internal`, `.External*`, `.Call`, `.C`,
    `.Fortran`, `.Primitive`, `environment<-`, `as.environment`, `baseenv`,

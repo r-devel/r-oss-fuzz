@@ -59,17 +59,20 @@ typedef struct {
 /* Whether the byte-code the sandbox's compiler produces for source names
  * the instruction: the base-like frame makes the compiler inline what it
  * finds there, and the wrappers frame keeps it from inlining past a cap. */
+static const char check_ops_fn_source[] = R"(
+function(env, source, instruction) {
+    code <- compiler::compile(parse(text = source)[[1L]], env)
+    ops <- paste(deparse(compiler::disassemble(code)), collapse = "")
+    grepl(instruction, ops, fixed = TRUE)
+}
+)";
+
 static void check_ops_source(void *data)
 {
     const ops_check_t *check = data;
     SEXP env, fn, call, result;
     Rf_protect(env = R_NewEnv(eval_wrappers, TRUE, 29));
-    Rf_protect(fn = R_ParseEvalString(
-        "function(env, source, instruction) {\n"
-        "    code <- compiler::compile(parse(text = source)[[1L]], env)\n"
-        "    ops <- paste(deparse(compiler::disassemble(code)), collapse = \"\")\n"
-        "    grepl(instruction, ops, fixed = TRUE)\n"
-        "}", R_BaseEnv));
+    Rf_protect(fn = R_ParseEvalString(check_ops_fn_source, R_BaseEnv));
     Rf_protect(call = Rf_lang4(fn, env, Rf_mkString(check->source),
                                Rf_mkString(check->instruction)));
     result = Rf_eval(call, R_BaseEnv);
@@ -89,17 +92,47 @@ static void check_ops(const char *source, const char *instruction, int expected)
 }
 
 /* The allowlist frame's attributes are the one name the compiler keys on,
- * whatever an input did to .GenericDefEnv. */
+ * whatever an input did to .GenericDefEnv, and topenv() of an input
+ * environment is that frame. */
+static const char check_builtins_fn_source[] = R"(
+function(env, input) {
+    identical(attributes(env), list(name = "package:base")) &&
+        !is.object(env) && identical(topenv(input), env)
+}
+)";
+
 static void check_builtins_name(void)
 {
-    SEXP fn, call, result;
-    Rf_protect(fn = R_ParseEvalString(
-        "function(env) identical(attributes(env), list(name = 'package:base')) && "
-        "!is.object(env)", R_BaseEnv));
-    Rf_protect(call = Rf_lang2(fn, eval_builtins));
+    SEXP fn, input, call, result;
+    Rf_protect(fn = R_ParseEvalString(check_builtins_fn_source, R_BaseEnv));
+    Rf_protect(input = R_NewEnv(eval_wrappers, TRUE, 29));
+    Rf_protect(call = Rf_lang3(fn, eval_builtins, input));
     result = Rf_eval(call, R_BaseEnv);
     assert(Rf_asLogical(result) == TRUE);
-    Rf_unprotect(2);
+    Rf_unprotect(3);
+}
+
+/* topenv() must not rest on the name attribute: with it gone, the frame is
+ * still recognised by its .packageName binding, so a method's lookup can
+ * never fall through to R_GlobalEnv and base's S3 methods. */
+static const char check_topenv_fn_source[] = R"(
+function(env, input) {
+    attributes(env) <- NULL
+    identical(topenv(input), env)
+}
+)";
+
+static void check_topenv_without_name(void *unused)
+{
+    (void)unused;
+    SEXP fn, input, call, result;
+    Rf_protect(fn = R_ParseEvalString(check_topenv_fn_source, R_BaseEnv));
+    Rf_protect(input = R_NewEnv(eval_wrappers, TRUE, 29));
+    Rf_protect(call = Rf_lang3(fn, eval_builtins, input));
+    result = Rf_eval(call, R_BaseEnv);
+    assert(Rf_asLogical(result) == TRUE);
+    eval_reset_builtins();
+    Rf_unprotect(3);
 }
 
 static void check(const char *source, int expect_error, double expected)
@@ -115,14 +148,6 @@ static void check(const char *source, int expect_error, double expected)
     check_builtins_name();
 }
 
-/* An input that must end, and how long it took: the on.exit grace is a
- * bound on work, so the time is printed rather than asserted. */
-static void check_timed(const char *source)
-{
-    clock_t start = clock();
-    check(source, 1, 0);
-    fprintf(stderr, "  %.2fs  %s\n", (double)(clock() - start) / CLOCKS_PER_SEC, source);
-}
 
 static void run_checks(void *unused)
 {
@@ -156,6 +181,7 @@ static void run_checks(void *unused)
         "x <- 1; attributes(x) <- list(class = 'example')",
         "x <- 1; attributes(x) <- list(names = 'a', class = 'example')",
         "x <- 1; class(x) <- 'example'", "x <- 1; oldClass(x) <- 'example'",
+        "f <- function() { on.exit(return(1)); 2 }; f()",
         "f <- function(x) UseMethod('f'); f.default <- function(x) NextMethod(); f(1)",
         "inherits(1, 'numeric')", "environment(sum)", "sys.call()",
         "sys.function()", "parent.frame()", "Recall()", "standardGeneric('f')",
@@ -251,25 +277,11 @@ static void run_checks(void *unused)
     check("as.character(quote(x)) == 'x'", 0, 1);
     check("x <- quote(y); as.character(x) == 'y'", 0, 1);
 
-    /* missing(), nargs(), switch() and on.exit() behave as in a session. */
+    /* missing(), nargs() and switch() behave as in a session. */
     check("f <- function(x, y) missing(y) + nargs(); f(1)", 0, 2);
     check("f <- function(x) switch(x, a = 1, b = , c = 3, 9); f('b') + f('z')", 0, 12);
     check("is.null(switch('z', a = 1))", 0, 1);
     check("switch(2, 1, 2, 3)", 0, 2);
-    check("f <- function() { on.exit(return(x + 1)); x <- 10; 0 }; f()", 0, 11);
-    check("f <- function() { on.exit(x <- 1); on.exit(x <- 2, add = TRUE); x <- 0; invisible(x) }; f()", 0, 0);
-
-    /* on.exit code runs during the unwind the budget error starts, with
-     * the check reloaded: a loop there ends too, however many frames set
-     * one, and whichever limit fired first. */
-    check_timed("f <- function() { on.exit(repeat {}); repeat {} }; f()");
-    check_timed("f <- function() { on.exit(repeat {}, add = TRUE); on.exit(repeat {}, add = TRUE); repeat {} }; f()");
-    check_timed("g <- function(n) { on.exit(repeat {}); if (n > 0) g(n - 1) else repeat {} }; g(200)");
-    check_timed("f <- function() { on.exit(repeat {}); x <- !1:999999; repeat !x }; f()");
-    check_timed("f <- function() { on.exit({ x <- !1:999999; repeat !x }); repeat {} }; f()");
-    check_timed("f <- function() { on.exit(f()); repeat {} }; f()");
-    check("40 + 2", 0, 42);
-    check("x <- 0; for (i in 1:20000) x <- x + 1; x", 0, 20000);
 
     /* Attributes other than class, through the primitives and through
      * attr<-, which refuses only the class attribute, by exact name. */
@@ -291,6 +303,22 @@ static void run_checks(void *unused)
     check("x <- 1:3; dim(x) <- 2", 1, 0);
     check("x <- 1; attr(x, c('a', 'b')) <- 1", 1, 0);
     check("x <- 1; attr(x, NA) <- 1", 1, 0);
+    /* Environments keep their attributes: the input only ever holds its
+     * own frames and the allowlist frame, and the latter's name is what
+     * topenv() and the compiler go by. */
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericDefEnv, 'name') <- 'x'; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attributes(.GenericDefEnv) <- NULL; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericCallEnv, 'a') <- 1; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { names(.GenericDefEnv) <- 'a'; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { dim(.GenericDefEnv) <- 1L; 1 }; foo(1)", 1, 0);
+    /* The escape the environment rule closes: with the frame's name gone,
+     * topenv() would fall back to R_GlobalEnv and the method lookup for
+     * a generic named like a base one would reach base's method. */
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { "
+          "attributes(.GenericDefEnv) <- NULL; w <- function(data, expr, ...) UseMethod('with'); "
+          "w(1, 2) }; foo(1)", 1, 0);
+    check("w <- function(data, expr, ...) UseMethod('with'); w(1, 2)", 1, 0);
+    check("s <- function(...) UseMethod('seq'); length(s(1, 1000000000))", 1, 0);
     check("f <- function() 1; attr(f, 'a') <- 2; attr(f, 'a') + f()", 0, 3);
 
     /* S3 dispatch on the implicit class, to methods the input defines and
@@ -310,14 +338,14 @@ static void run_checks(void *unused)
     check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) .GenericDefEnv$c(1, 2)[2]; foo(1)", 0, 2);
     check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericDefEnv$x <- 1; 1 }; foo(1)", 1, 0);
     check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericDefEnv[['sum']] <- 1; 1 }; foo(1)", 1, 0);
-    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericDefEnv, 'name') <- 'x'; 1 }; foo(1)", 0, 1);
-    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attributes(.GenericDefEnv) <- NULL; 1 }; foo(1)", 0, 1);
-    /* ... and a 3 MB one is gone before the next input needs 4 MB of the
-     * 8 MB heap (base R holds about 1 MB of it). */
-    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericDefEnv, 'junk') <- rep(1, 375000); 1 }; foo(1)", 0, 1);
-    check("x <- 1; x[500000] <- 1; length(x)", 0, 500000);
+    /* levels<- is the one setter that reaches an environment's attributes;
+     * a 2 MB one is gone before the next input needs 5 MB of the 8 MB heap
+     * (base R holds about 1 MB of it). */
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { levels(.GenericDefEnv) <- as.double(seq_len(250000)); 1 }; foo(1)", 0, 1);
+    check("x <- 1; x[650000] <- 1; length(x)", 0, 650000);
     check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericCallEnv$y <- 7; 1 }; foo(1); y", 0, 7);
-    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { on.exit(repeat {}); repeat {} }; foo(1)", 1, 0);
+    assert(R_ToplevelExec(check_topenv_without_name, NULL));
+    check_builtins_name();
     /* Internal generics do not dispatch without a class attribute, so
      * base's own S3 methods stay out of reach. */
     check("x <- 1:4; dim(x) <- c(2, 2); length(x)", 0, 4);

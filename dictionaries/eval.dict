@@ -28,8 +28,6 @@
 "missing("
 "nargs()"
 "switch("
-"on.exit("
-"add = TRUE"
 "unclass("
 "attr("
 "attributes("
