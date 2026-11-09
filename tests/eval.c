@@ -50,23 +50,56 @@ static void check_compiled(const char *source)
     assert(eval_budget == 0);
 }
 
-/* A loop with a conditional break compiles to a jump, not a loop context,
- * only while the isBaseVar rebinding in eval_compiler_setup takes. */
-static void check_loop_jump(void *unused)
+typedef struct {
+    const char *source;
+    const char *instruction;
+    int expected;
+} ops_check_t;
+
+/* Whether the byte-code the sandbox's compiler produces for source names
+ * the instruction: the base-like frame makes the compiler inline what it
+ * finds there, and the wrappers frame keeps it from inlining past a cap. */
+static void check_ops_source(void *data)
 {
-    (void)unused;
+    const ops_check_t *check = data;
     SEXP env, fn, call, result;
     Rf_protect(env = R_NewEnv(eval_wrappers, TRUE, 29));
     Rf_protect(fn = R_ParseEvalString(
-        "function(env) {\n"
-        "    code <- compiler::compile(quote(for (i in 1:3) if (i == 2) break), env)\n"
+        "function(env, source, instruction) {\n"
+        "    code <- compiler::compile(parse(text = source)[[1L]], env)\n"
         "    ops <- paste(deparse(compiler::disassemble(code)), collapse = \"\")\n"
-        "    grepl(\"STARTFOR\", ops) && !grepl(\"STARTLOOPCNTXT\", ops)\n"
+        "    grepl(instruction, ops, fixed = TRUE)\n"
         "}", R_BaseEnv));
-    Rf_protect(call = Rf_lang2(fn, env));
+    Rf_protect(call = Rf_lang4(fn, env, Rf_mkString(check->source),
+                               Rf_mkString(check->instruction)));
+    result = Rf_eval(call, R_BaseEnv);
+    if (Rf_asLogical(result) != check->expected) {
+        fprintf(stderr, "%s %s in the byte-code of: %s\n",
+                check->expected ? "expected" : "did not expect",
+                check->instruction, check->source);
+        abort();
+    }
+    Rf_unprotect(3);
+}
+
+static void check_ops(const char *source, const char *instruction, int expected)
+{
+    ops_check_t check = { source, instruction, expected };
+    assert(R_ToplevelExec(check_ops_source, &check));
+}
+
+/* The allowlist frame's attributes are the one name the compiler keys on,
+ * whatever an input did to .GenericDefEnv. */
+static void check_builtins_name(void)
+{
+    SEXP fn, call, result;
+    Rf_protect(fn = R_ParseEvalString(
+        "function(env) identical(attributes(env), list(name = 'package:base')) && "
+        "!is.object(env)", R_BaseEnv));
+    Rf_protect(call = Rf_lang2(fn, eval_builtins));
     result = Rf_eval(call, R_BaseEnv);
     assert(Rf_asLogical(result) == TRUE);
-    Rf_unprotect(3);
+    Rf_unprotect(2);
 }
 
 static void check(const char *source, int expect_error, double expected)
@@ -79,6 +112,16 @@ static void check(const char *source, int expect_error, double expected)
     }
     /* Every path out of an input must leave the budget switched off. */
     assert(eval_budget == 0);
+    check_builtins_name();
+}
+
+/* An input that must end, and how long it took: the on.exit grace is a
+ * bound on work, so the time is printed rather than asserted. */
+static void check_timed(const char *source)
+{
+    clock_t start = clock();
+    check(source, 1, 0);
+    fprintf(stderr, "  %.2fs  %s\n", (double)(clock() - start) / CLOCKS_PER_SEC, source);
 }
 
 static void run_checks(void *unused)
@@ -106,10 +149,18 @@ static void run_checks(void *unused)
         "system('true')", "base::identity(1)", "base:::identity(1)",
         "get('identity')", "getNamespace('base')", "library(base)",
         ".GlobalEnv", "globalenv()", "environment()", "parent.frame()",
-        "eval(1)", "quote(1)", ".Internal(inspect(NULL))",
+        "eval(1)", "eval(quote(1))", ".Internal(inspect(NULL))",
         ".Call('eval_harness_nonexistent_symbol')", "file()", "quit()",
         "options(warn = 0)", "setTimeLimit(cpu = Inf)", "x <<- 1",
-        "attr(1, 'class') <- 'example'"
+        "x <- 1; attr(x, 'class') <- 'example'",
+        "x <- 1; attributes(x) <- list(class = 'example')",
+        "x <- 1; attributes(x) <- list(names = 'a', class = 'example')",
+        "x <- 1; class(x) <- 'example'", "x <- 1; oldClass(x) <- 'example'",
+        "f <- function(x) UseMethod('f'); f.default <- function(x) NextMethod(); f(1)",
+        "inherits(1, 'numeric')", "environment(sum)", "sys.call()",
+        "sys.function()", "parent.frame()", "Recall()", "standardGeneric('f')",
+        "forceAndCall(1, sum, 1)", ".seq_len(1)", ".seq_int(1, 2)",
+        ".attr_set(1, 'a', 1)", ".attributes_set(1, NULL)", ".colon(1, 2)"
     };
     for (size_t i = 0; i < sizeof(blocked) / sizeof(*blocked); i++)
         check(blocked[i], 1, 0);
@@ -189,6 +240,110 @@ static void run_checks(void *unused)
         check("x <- 1; y <- 2; x++++++++++++++++++++y", 0, 3);
     }
 
+    /* Language objects are inert: substitute() and quote() hand back calls
+     * the input can take apart but never run. */
+    check("length(quote(f(x)))", 0, 2);
+    check("f <- function(x) substitute(x); length(f(a + b))", 0, 3);
+    check("f <- function(x) substitute(x); length(f(system('true')))", 0, 2);
+    check("f <- function(x) substitute(x); e <- f(system('true')); e[[1]] <- quote(c); length(e)", 0, 2);
+    check("e <- quote(f(x)); e[[1]] <- quote(sum); e[[2]] <- 3; length(e)", 0, 2);
+    check("all(quote(x))", 1, 0);
+    check("as.character(quote(x)) == 'x'", 0, 1);
+    check("x <- quote(y); as.character(x) == 'y'", 0, 1);
+
+    /* missing(), nargs(), switch() and on.exit() behave as in a session. */
+    check("f <- function(x, y) missing(y) + nargs(); f(1)", 0, 2);
+    check("f <- function(x) switch(x, a = 1, b = , c = 3, 9); f('b') + f('z')", 0, 12);
+    check("is.null(switch('z', a = 1))", 0, 1);
+    check("switch(2, 1, 2, 3)", 0, 2);
+    check("f <- function() { on.exit(return(x + 1)); x <- 10; 0 }; f()", 0, 11);
+    check("f <- function() { on.exit(x <- 1); on.exit(x <- 2, add = TRUE); x <- 0; invisible(x) }; f()", 0, 0);
+
+    /* on.exit code runs during the unwind the budget error starts, with
+     * the check reloaded: a loop there ends too, however many frames set
+     * one, and whichever limit fired first. */
+    check_timed("f <- function() { on.exit(repeat {}); repeat {} }; f()");
+    check_timed("f <- function() { on.exit(repeat {}, add = TRUE); on.exit(repeat {}, add = TRUE); repeat {} }; f()");
+    check_timed("g <- function(n) { on.exit(repeat {}); if (n > 0) g(n - 1) else repeat {} }; g(200)");
+    check_timed("f <- function() { on.exit(repeat {}); x <- !1:999999; repeat !x }; f()");
+    check_timed("f <- function() { on.exit({ x <- !1:999999; repeat !x }); repeat {} }; f()");
+    check_timed("f <- function() { on.exit(f()); repeat {} }; f()");
+    check("40 + 2", 0, 42);
+    check("x <- 0; for (i in 1:20000) x <- x + 1; x", 0, 20000);
+
+    /* Attributes other than class, through the primitives and through
+     * attr<-, which refuses only the class attribute, by exact name. */
+    check("x <- 1:3; names(x) <- c('a', 'b', 'c'); x[['b']]", 0, 2);
+    check("x <- 1:4; dim(x) <- c(2, 2); x[2, 1]", 0, 2);
+    check("x <- 1:4; dim(x) <- c(2, 2); dimnames(x) <- list(c('a', 'b'), NULL); x['b', 1]", 0, 2);
+    check("x <- 1; attr(x, 'foo') <- 2; attr(x, 'foo')", 0, 2);
+    check("x <- 1; attr(x, 'cls') <- 'foo'; attr(x, 'cls') == 'foo'", 0, 1);
+    check("x <- 1:2; attributes(x) <- list(names = c('a', 'b')); names(x)[2] == 'b'", 0, 1);
+    check("x <- 1:2; attributes(x) <- NULL; is.null(names(x))", 0, 1);
+    check("x <- 1:2; levels(x) <- c('a', 'b'); length(attr(x, 'levels'))", 0, 2);
+    check("x <- 1; levels(x) <- 'a'; class(x) == 'numeric'", 0, 1);
+    check("x <- 1:4; attr(x, 'dim') <- c(2, 2); length(dim(x))", 0, 2);
+    check("is.null(attr(1, 'class')) + is.null(oldClass(1)) + is.null(attributes(1))", 0, 3);
+    check("class(1) == 'numeric'", 0, 1);
+    check("x <- 1:4; dim(x) <- c(2, 2); class(x)[1] == 'matrix'", 0, 1);
+    check("unclass(1)", 0, 1);
+    check("x <- 1:3; names(x) <- 'a'; is.na(names(x)[3])", 0, 1);
+    check("x <- 1:3; dim(x) <- 2", 1, 0);
+    check("x <- 1; attr(x, c('a', 'b')) <- 1", 1, 0);
+    check("x <- 1; attr(x, NA) <- 1", 1, 0);
+    check("f <- function() 1; attr(f, 'a') <- 2; attr(f, 'a') + f()", 0, 3);
+
+    /* S3 dispatch on the implicit class, to methods the input defines and
+     * nothing else; the dispatch variables are set; .GenericDefEnv is the
+     * locked allowlist frame, whose attributes do not survive the input. */
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) 1; "
+          "foo.numeric <- function(x) 2; foo(1) + 10 * foo('a')", 0, 12);
+    check("foo <- function(x) UseMethod('foo'); foo.function <- function(x) 3; foo(foo)", 0, 3);
+    check("foo <- function(x) UseMethod('foo'); foo.matrix <- function(x) 4; "
+          "x <- 1:4; dim(x) <- c(2, 2); foo(x)", 0, 4);
+    check("foo <- function(x) UseMethod('foo'); foo.integer <- function(x) 5; "
+          "foo.numeric <- function(x) 6; foo(1L) + 10 * foo(1)", 0, 65);
+    check("foo <- function(x, ...) UseMethod('foo'); foo.default <- function(x, ...) length(list(...)); foo(1, 2, 3)", 0, 2);
+    check("foo <- function(x) UseMethod('foo'); foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) .Generic == 'foo'; foo(1)", 0, 1);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) length(.Class); foo(1)", 0, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) .GenericDefEnv$c(1, 2)[2]; foo(1)", 0, 2);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericDefEnv$x <- 1; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericDefEnv[['sum']] <- 1; 1 }; foo(1)", 1, 0);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericDefEnv, 'name') <- 'x'; 1 }; foo(1)", 0, 1);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attributes(.GenericDefEnv) <- NULL; 1 }; foo(1)", 0, 1);
+    /* ... and a 3 MB one is gone before the next input needs 4 MB of the
+     * 8 MB heap (base R holds about 1 MB of it). */
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { attr(.GenericDefEnv, 'junk') <- rep(1, 375000); 1 }; foo(1)", 0, 1);
+    check("x <- 1; x[500000] <- 1; length(x)", 0, 500000);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { .GenericCallEnv$y <- 7; 1 }; foo(1); y", 0, 7);
+    check("foo <- function(x) UseMethod('foo'); foo.default <- function(x) { on.exit(repeat {}); repeat {} }; foo(1)", 1, 0);
+    /* Internal generics do not dispatch without a class attribute, so
+     * base's own S3 methods stay out of reach. */
+    check("x <- 1:4; dim(x) <- c(2, 2); length(x)", 0, 4);
+    check("x <- list(a = 1); levels(x) <- 'z'; x$a", 0, 1);
+
+    /* The compact sequence builders are capped on their result; rep()
+     * allocates, so the heap bounds it. */
+    check("length(seq_len(1000000))", 0, 1000000);
+    check("seq_len(1000001)", 1, 0);
+    check("prod(seq_len(1000000000))", 1, 0);
+    check("seq_len(-1)", 1, 0);
+    check("length(seq.int(1, 10))", 0, 10);
+    check("seq.int(1, 3)[3]", 0, 3);
+    check("length(seq.int(0, 1, by = 0.25))", 0, 5);
+    check("seq.int(1, 1000000000)", 1, 0);
+    check("seq.int(1, 1000000000, by = 1)", 1, 0);
+    check("seq.int(length.out = 10000000)", 1, 0);
+    check("seq.int(1, 1000000000, length.out = 1000000000)", 1, 0);
+    check("sum(seq.int(1, 1000000000), 1)", 1, 0);
+    check("f <- function() prod(seq_len(1000000000)); f()", 1, 0);
+    check("f <- function() max(seq.int(1, 1000000000), 1L); f()", 1, 0);
+    check("length(rep(1:2, 3))", 0, 6);
+    check("rep(1L, 1000000000)", 1, 0);
+    check("rep(1:2, length.out = 1000000000)", 1, 0);
+    check("length(seq_along(c(1, 2, 3)))", 0, 3);
+
     /* `:` is a length-capped wrapper: long compact sequences are refused
      * before a reduction can walk them, short ones behave as usual, and
      * the wrapper's private environment stays out of reach. */
@@ -212,6 +367,10 @@ static void run_checks(void *unused)
     check(".colon(1, 2)", 1, 0);
     check(".Internal(stop(TRUE, 'x'))", 1, 0);
 
+    /* The warm-up input exercises the new surface too, and must not have
+     * been failing silently. */
+    check(eval_warmup_source, 0, 2);
+
     /* Byte-code: closures are created with compiled bodies, top-level
      * loops are compiled, and every bound above holds on that path too. */
     check_compiled("function(x) x + 1");
@@ -225,7 +384,19 @@ static void run_checks(void *unused)
     check("f <- function() length(1:1000000); f()", 0, 1000000);
     check("f <- function() { x <- !1:999999; repeat !x }; f()", 1, 0);
     check("f <- function() { x <- 1; x[2000000] <- 1 }; f()", 1, 0);
-    assert(R_ToplevelExec(check_loop_jump, NULL));
+    /* A loop with a conditional break compiles to a jump, not a loop
+     * context, only while the isBaseVar rebinding in eval_compiler_setup
+     * takes; names in the base-like frame are inlined, the wrappers are
+     * called. */
+    check_ops("for (i in 1:3) if (i == 2) break", "STARTFOR", 1);
+    check_ops("for (i in 1:3) if (i == 2) break", "STARTLOOPCNTXT", 0);
+    check_ops("seq_along(x)", "SEQALONG", 1);
+    check_ops("switch(x, a = 1, 2)", "SWITCH", 1);
+    check_ops("x + 1", "ADD", 1);
+    check_ops("1:3", "COLON", 0);
+    check_ops("seq_len(3)", "SEQLEN", 0);
+    check_ops("prod(seq_len(1))", "LDCONST", 0);
+    check_ops("prod(seq_along(1))", "LDCONST", 1);
 
     /* Construct the tree directly: older R parsers can fail on deep syntax
      * before our post-parse guard is reached. This check is for the guard.
