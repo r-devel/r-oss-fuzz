@@ -27,7 +27,7 @@ it as already-applied in the meantime, which is harmless).
  	_new->next = NULL;
  	if (s[i + 1] == L'-') {
  	    _new->type = WTR_RANGE;
-@@ -1253,7 +1253,7 @@
+@@ -1253,22 +1253,11 @@
  	This = This->next = _new;
      }
      for ( ; i < len; i++) {
@@ -36,10 +36,10 @@ it as already-applied in the meantime, which is harmless).
  	_new->next = NULL;
  	_new->type = WTR_CHAR;
  	_new->u.c = s[i];
-@@ -1261,17 +1261,6 @@
-     }
- }
- 
+ 	This = This->next = _new;
+-    }
+-}
+-
 -static void
 -wtr_free_spec(struct wtr_spec *trs) {
 -    struct wtr_spec *This, *next;
@@ -48,12 +48,9 @@ it as already-applied in the meantime, which is harmless).
 -	next = This->next;
 -	R_Free(This);
 -	This = next;
--    }
--}
--
- static wchar_t
- wtr_get_next_char_from_spec(struct wtr_spec **p) {
-     wchar_t c;
+     }
+ }
+ 
 @@ -1321,7 +1310,7 @@
  
      This = trs;
@@ -116,7 +113,7 @@ it as already-applied in the meantime, which is harmless).
  	trs_cnt->type = WTR_INIT;
  	trs_cnt->next = NULL;
  	wtr_build_spec(wc, trs_cnt); /* use count only */
-@@ -1563,17 +1543,15 @@
+@@ -1563,21 +1543,19 @@
  	   wtr_spec lists and retrieving the next chars from the lists.
  	*/
  
@@ -127,6 +124,10 @@ it as already-applied in the meantime, which is harmless).
  	      xtable_cnt++) ;
 -	wtr_free_spec(trs_cnt);
 -	R_Free(trs_cnt_ptr);
+ 	/* the table is indexed with int below; counted in int, 2^32
+ 	   entries wrapped to 0 and the table was written past its end */
+ 	if (xtable_cnt > INT_MAX)
+ 	    error(_("'old' expands to too many characters"));
  	xtable = (xtable_t *) R_alloc(xtable_cnt+1, sizeof(xtable_t));
  
 -	trs_old_ptr = R_Calloc(1, struct wtr_spec *);
@@ -137,19 +138,19 @@ it as already-applied in the meantime, which is harmless).
  	*trs_new_ptr = trs_new->next;
  	for (i = 0; ; i++) {
  	    c_old = wtr_get_next_char_from_spec(trs_old_ptr);
-@@ -1588,11 +1566,6 @@
+@@ -1591,11 +1569,6 @@
+ 		xtable[i].c_new = c_new;
  	    }
  	}
- 
+-
 -	/* Free the memory occupied by the wtr_spec lists. */
 -	wtr_free_spec(trs_old);
 -	wtr_free_spec(trs_new);
 -	R_Free(trs_old_ptr); R_Free(trs_new_ptr);
--
+ 
  	ISORT(xtable, xtable_cnt, xtable_t , xtable_comp);
  	COMPRESS(xtable, &xtable_cnt, xtable_t, xtable_comp);
- 
-@@ -1648,11 +1621,11 @@
+@@ -1656,11 +1629,11 @@
  	for (unsigned int ii = 0; ii <= UCHAR_MAX; ii++)
  	    xtable[ii] = (unsigned char) ii;
  
@@ -164,7 +165,7 @@ it as already-applied in the meantime, which is harmless).
  	trs_new->type = TR_INIT;
  	trs_new->next = NULL;
  	/* Build the old and new tr_spec lists. */
-@@ -1661,9 +1634,9 @@
+@@ -1669,9 +1642,9 @@
  	/* Initialize the pointers for walking through the old and new
  	   tr_spec lists and retrieving the next chars from the lists.
  	*/
@@ -176,7 +177,7 @@ it as already-applied in the meantime, which is harmless).
  	*trs_new_ptr = trs_new->next;
  	for (;;) {
  	    c_old = tr_get_next_char_from_spec(trs_old_ptr);
-@@ -1675,11 +1648,6 @@
+@@ -1683,11 +1656,6 @@
  	    else
  		xtable[c_old] = c_new;
  	}
