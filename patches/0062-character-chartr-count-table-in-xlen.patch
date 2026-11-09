@@ -1,0 +1,44 @@
+Count chartr()'s translation table in R_xlen_t and reject more
+than INT_MAX entries.
+
+do_chartr() (src/main/character.c) counts the expanded 'old' spec
+into an int, xtable_cnt, before allocating the table with R_alloc()
+and filling it in a second pass.  A spec whose ranges add up to 2^32
+characters wraps the count to 0: R_alloc() hands back a one-entry
+table and the fill loop writes 4G entries past it.  A valid 23 KB
+spec of repeated "\x01-\U0010FFFF" ranges in a UTF-8 locale does it;
+R 4.5.3 segfaults in about 7 s.  Count in R_xlen_t and signal an
+error above INT_MAX, since the table is indexed with int below.
+
+Found by OSS-Fuzz (libFuzzer_r_character, Timeout): testcase
+5469970587516928 led to the review of the native-string path that
+found this; the testcase itself is a 6-byte UTF-8 range that glibc's
+mbstowcs() still decodes, handled by the harness guard.
+
+Upstream status: r-devel/r-svn PR #458 and Bugzilla PR#19292, filed
+2026-11-07.
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/character.c b/src/main/character.c
+--- a/src/main/character.c
++++ b/src/main/character.c
+@@ -1448,7 +1448,7 @@
+     if (mbcslocale || use_WC == TRUE) {
+ 	int j, nb, nc;
+ 	xtable_t *xtable, *tbl;
+-	int xtable_cnt;
++	R_xlen_t xtable_cnt;
+ 	struct wtr_spec *trs_cnt, **trs_cnt_ptr;
+ 	wchar_t c_old, c_new, *wc;
+ 	const char *xi, *s;
+@@ -1523,6 +1523,10 @@
+ 	*trs_cnt_ptr = trs_cnt->next;
+ 	for (xtable_cnt = 0 ; wtr_get_next_char_from_spec(trs_cnt_ptr);
+ 	      xtable_cnt++) ;
++	/* the table is indexed with int below; counted in int, 2^32
++	   entries wrapped to 0 and the table was written past its end */
++	if (xtable_cnt > INT_MAX)
++	    error(_("'old' expands to too many characters"));
+ 	xtable = (xtable_t *) R_alloc(xtable_cnt+1, sizeof(xtable_t));
+ 
+ 	trs_old_ptr = (struct wtr_spec **) R_alloc(1, sizeof(struct wtr_spec *));
