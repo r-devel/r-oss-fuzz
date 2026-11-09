@@ -90,11 +90,17 @@ so loops compile the way a session's do. `tests/eval.c` checks all of this:
 closures come back with byte-code bodies, a loop with a conditional break
 has no `STARTLOOPCNTXT`, and every bound below holds on the compiled path.
 
-The compiler's own code is byte-compiled base R and runs with the budget
-paused, so its cost is bounded by the parsed-tree limits rather than by the
-budget. Constant folding evaluates base functions on literals only, and a
-warm-up input at start-up loads the compiler's internals before fuzzing
-begins, so every input sees the same R.
+The compiler's own code is byte-compiled base R and runs under the same
+budget as the code it produces; a compile the budget cuts off ends the input
+with an error, since running the expression uncompiled would evade the
+limit. The budget used to pause for compilation, leaving the parsed-tree
+limits as its only bound, but constant folding re-walks every subtree at
+each level of nesting, so compile time is quadratic in depth: four
+expressions nested 62 calls deep (270 bytes) took over 4 s under ASAN and
+timed out on the bots. Compiling an ordinary input costs a few hundred
+interrupt checks of the 20000. Constant folding evaluates base functions on
+literals only, and a warm-up input at start-up loads the compiler's
+internals before fuzzing begins, so every input sees the same R.
 
 ## Limits
 
@@ -103,7 +109,7 @@ begins, so every input sees the same R.
 | input size | 8 KiB, valid UTF-8, no embedded NUL | harness, before parsing |
 | parsed tree | depth 64, 1024 nodes | post-parse walk (`eval_tree_within_budget`) |
 | vector heap | 8 MiB (`R_VSIZE` and `R_MAX_VSIZE`) | R's allocator; an ordinary R error |
-| compilation | outside the budget; bounded by the parsed-tree limits | harness (`eval_compile`) |
+| compilation | the input's budget and CPU backstop, like execution | the same hook; `eval_source` ends the input |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
 | recursion | R's `expressions` limit and C stack check, against the R thread's 1 GiB stack | R; an ordinary R error |
