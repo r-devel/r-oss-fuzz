@@ -1,0 +1,49 @@
+Size a released CHARSXP by its length, not by the hash value kept in
+its TRUELENGTH.
+
+getVecSizeInVEC() (src/main/memory.c) extends a growable vector to its
+TRUELENGTH before ReleaseLargeFreeVectors() subtracts the vector's size
+from R_LargeVallocSize.  IS_GROWABLE() tests gp bit 5 and
+LENGTH < TRUELENGTH, but for a CHARSXP bit 5 is the "cached" mark, set
+on every string, and TRUELENGTH holds the hash value once the string
+has been hashed.  A hashed string that is not a symbol's print name
+can be collected, and one longer than 128 bytes was then released as
+if it were up to 2^28 bytes long.  R_LargeVallocSize wraps below zero,
+after which gc() reports about 1.8e19 Vcells in use, R_MAX_VSIZE no
+longer limits anything, and vector allocation no longer triggers a
+collection.
+
+installNoTrChar() hashes its argument before rejecting a name longer
+than 10000 bytes, so unserialize() of a SYMSXP with such a name leaves
+exactly that kind of string behind (as does as.name() in R 4.6.1).
+Here that defeated the harnesses' vector heap cap (FUZZ_R_MAX_VSIZE):
+after a few such inputs garbage was no longer collected and the
+process grew until libFuzzer's -rss_limit_mb=2560 killed it.
+
+Found by OSS-Fuzz (libFuzzer_r_unserialize): testcase 4823638474555392,
+an unreproducible Out-of-memory with 2.5 GB of 32 MB string vectors
+live under the 512Mb cap; 20% of the target's sessions ended that way
+on 2026-11-10.  The filed input alone peaks near 545 MB; it reproduces
+after 40 inputs that each name a distinct 20000-byte symbol.
+
+Upstream status: r-devel/r-svn PR #466, filed 2026-11-10 (no Bugzilla
+report).  The upstream PR also adds a regression test to
+tests/reg-fuzz.R, left out here so this carry patch does not go stale
+with that file.
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/memory.c b/src/main/memory.c
+index b66e983ed2..620b27d86b 100644
+--- a/src/main/memory.c
++++ b/src/main/memory.c
+@@ -1105,7 +1105,9 @@ static void TryToReleasePages(void)
+ /* compute size in VEC units so result will fit in LENGTH field for FREESXPs */
+ static R_INLINE R_size_t getVecSizeInVEC(SEXP s)
+ {
+-    if (IS_GROWABLE(s))
++    /* For a CHARSXP the growable bit is the 'cached' mark and
++       TRUELENGTH may hold a hash value. */
++    if (TYPEOF(s) != CHARSXP && IS_GROWABLE(s))
+ 	SET_STDVEC_LENGTH(s, XTRUELENGTH(s));
+ 
+     R_size_t size;
