@@ -26,10 +26,11 @@ live under the 512Mb cap; 20% of the target's sessions ended that way
 on 2026-11-10.  The filed input alone peaks near 545 MB; it reproduces
 after 40 inputs that each name a distinct 20000-byte symbol.
 
-Upstream status: r-devel/r-svn PR #466, filed 2026-11-10 (no Bugzilla
-report).  The upstream PR also adds a regression test to
-tests/reg-fuzz.R, left out here so this carry patch does not go stale
-with that file.
+Upstream status: R Bugzilla 19195, reported independently on
+2026-10-01 with a patch making the same change (unconfirmed);
+r-devel/r-svn PR #466, filed 2026-11-10.  The upstream PR also adds a
+regression test to tests/reg-fuzz.R, left out here so this carry patch
+does not go stale with that file.
 Delete this patch once the fix lands in R trunk.
 
 diff --git a/src/main/memory.c b/src/main/memory.c
