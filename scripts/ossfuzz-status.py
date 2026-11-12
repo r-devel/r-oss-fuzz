@@ -20,6 +20,11 @@ day's statistics only after it ends, and asks for today alone answer
               sessions; R's startup alone reaches most of it, so compare
               targets against the lowest one rather than against zero
 
+--by-day prints a row per target and day instead of one total per
+target, for following a trend across a harness change: the shares vary
+a lot from day to day, and a day can mix two builds.  --target limits
+the statistics and the testcases to the named targets.
+
 The data comes from the JSON endpoints behind the ClusterFuzz dashboard
 pages (Fuzzer Statistics, Testcases), which need a logged-in session:
 the value of the oss-fuzz.com "session" cookie, read from
@@ -28,12 +33,14 @@ are made.  These endpoints are not a public API and may change.
 
 Usage:
     scripts/ossfuzz-status.py [--days N] [--engine libfuzzer|afl]
+                              [--by-day] [--target NAME ...]
                               [--no-testcases]
 """
 
 import argparse
 import concurrent.futures
 import datetime
+import http.client
 import json
 import os
 import re
@@ -51,6 +58,14 @@ JOBS = {
 
 # A target is flagged when this share of its sessions ended this way.
 FLAG_PERCENT = 1.0
+
+# Ways a session can end other than running out its time.
+BAD_ENDINGS = ("timeout", "oom", "crash", "leak", "startup")
+
+STATS_HEADER = ["exec/s", "fuzz%", "timeout%", "oom%", "leak%", "crash%",
+                "new", "edges", "flags"]
+
+REQUEST_ATTEMPTS = 3
 
 
 class SessionError(Exception):
@@ -83,8 +98,15 @@ def request(cookie, path, body=None):
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(BASE + path, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+
+    # The testcases page (over 1 MB) now and then arrives cut short.
+    for attempt in range(REQUEST_ATTEMPTS):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except http.client.IncompleteRead:
+            if attempt == REQUEST_ATTEMPTS - 1:
+                raise
 
 
 def request_json(cookie, path, body):
@@ -180,6 +202,36 @@ def load_stats(cookie, token, engine, date_start, date_end):
     return rows
 
 
+def load_daily_stats(cookie, token, engine, date_start, date_end):
+    """(date, rows) for each day, oldest first.  The endpoint totals over
+    its range, so each day is a request of its own."""
+    days = [date_start + datetime.timedelta(days=i)
+            for i in range((date_end - date_start).days + 1)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        tables = list(pool.map(
+            lambda d: load_stats(cookie, token, engine, d, d), days))
+    return list(zip(days, tables))
+
+
+def select(rows, targets):
+    if not targets:
+        return rows
+    return [r for r in rows if r["target"] in targets]
+
+
+def warn_missing(targets, tables):
+    # A misspelled target would otherwise look like a quiet one.
+    seen = {r["target"] for rows in tables for r in rows}
+    missing = sorted(targets - seen)
+    if seen and missing:
+        print(f"ossfuzz-status: no statistics for {', '.join(missing)}",
+              file=sys.stderr)
+
+
+def badness(row):
+    return sum(row[k] or 0.0 for k in BAD_ENDINGS)
+
+
 def flags(row):
     out = []
     for key, word in (("timeout", "timeouts"), ("oom", "ooms"),
@@ -204,6 +256,27 @@ def print_table(header, rows, right):
         print("  ".join(cells).rstrip())
 
 
+def stats_cells(r):
+    return [
+        f"{r['exec_per_sec']:.1f}",
+        percent(r["fuzzing_time"]), percent(r["timeout"]),
+        percent(r["oom"]), percent(r["leak"]), percent(r["crash"]),
+        r["new_crashes"], r["edges"], ", ".join(flags(r)),
+    ]
+
+
+def print_edges_note(rows):
+    covered = [(float(str(r["edges"]).rstrip("%")), r["target"])
+               for r in rows if re.fullmatch(r"[0-9.]+%", str(r["edges"]))]
+    if not covered:
+        return
+    note = "edges come from the daily coverage job and are mostly R startup"
+    if len(covered) > 1:
+        low, target = min(covered)
+        note += f"; the lowest is {target} at {low:.2f}%"
+    print(note)
+
+
 def print_stats(rows, engine, date_start, date_end):
     print(f"{JOBS[engine][1]}, {date_start} to {date_end} UTC "
           f"(fuzz%: time spent fuzzing; other %: sessions ending that way)")
@@ -211,29 +284,40 @@ def print_stats(rows, engine, date_start, date_end):
         print("  no statistics for this range")
         return
 
-    bad = ("timeout", "oom", "crash", "leak", "startup")
-    rows.sort(key=lambda r: (-sum(r[k] or 0.0 for k in bad),
-                             r["exec_per_sec"]))
-    table = []
-    for r in rows:
-        table.append([
-            r["target"], f"{r['exec_per_sec']:.1f}",
-            percent(r["fuzzing_time"]), percent(r["timeout"]),
-            percent(r["oom"]), percent(r["leak"]), percent(r["crash"]),
-            r["new_crashes"], r["edges"], ", ".join(flags(r)),
-        ])
-    print_table(
-        ["target", "exec/s", "fuzz%", "timeout%", "oom%", "leak%", "crash%",
-         "new", "edges", "flags"],
-        table, right={1, 2, 3, 4, 5, 6, 7, 8},
-    )
+    rows.sort(key=lambda r: (-badness(r), r["exec_per_sec"]))
+    table = [[r["target"]] + stats_cells(r) for r in rows]
+    print_table(["target"] + STATS_HEADER, table, right=set(range(1, 9)))
+    print_edges_note(rows)
 
-    covered = [(float(str(r["edges"]).rstrip("%")), r["target"])
-               for r in rows if re.fullmatch(r"[0-9.]+%", str(r["edges"]))]
-    if covered:
-        low, target = min(covered)
-        print(f"edges come from the daily coverage job and are mostly R "
-              f"startup; the lowest is {target} at {low:.2f}%")
+
+def print_daily_stats(days, engine):
+    print(f"{JOBS[engine][1]}, {days[0][0]} to {days[-1][0]} UTC by day "
+          f"(fuzz%: time spent fuzzing; other %: sessions ending that way)")
+
+    by_target = {}
+    for date, rows in days:
+        for r in rows:
+            by_target.setdefault(r["target"], []).append((date, r))
+    if not by_target:
+        print("  no statistics for this range")
+        return
+
+    # Worst targets first, ranked on their daily average as in the
+    # summary; each target's days stay in date order.
+    order = sorted(by_target, key=lambda t: (
+        -sum(badness(r) for _, r in by_target[t]) / len(by_target[t]),
+        sum(r["exec_per_sec"] for _, r in by_target[t]) / len(by_target[t]),
+    ))
+    table = []
+    for target in order:
+        for i, (date, r) in enumerate(by_target[target]):
+            label = target if i == 0 else ""
+            table.append([label, date.strftime("%m-%d")] + stats_cells(r))
+    print_table(["target", "date"] + STATS_HEADER, table,
+                right=set(range(2, 10)))
+
+    latest = next((rows for _, rows in reversed(days) if rows), [])
+    print_edges_note(latest)
 
 
 def load_testcases(cookie, token):
@@ -267,11 +351,8 @@ def last_task(comments):
     return f"{match.group(1)[5:]} {task}"[:60]
 
 
-def print_testcases(cookie, token):
+def print_testcases(cookie, token, targets):
     items = load_testcases(cookie, token)
-    print(f"Open testcases ({len(items)})")
-    if not items:
-        return
 
     # The list lacks the fuzzer and the task history; each detail request
     # takes seconds, so they go out together.
@@ -282,8 +363,18 @@ def print_testcases(cookie, token):
                                    {"testcaseId": t["id"]}),
             items))
 
-    table = []
+    pairs = []
     for item, detail in zip(items, details):
+        fuzzer = detail.get("testcase", {}).get("overridden_fuzzer_name")
+        if not targets or target_name(fuzzer) in targets:
+            pairs.append((item, detail))
+
+    print(f"Open testcases ({len(pairs)})")
+    if not pairs:
+        return
+
+    table = []
+    for item, detail in pairs:
         testcase = detail.get("testcase", {})
         fuzzer = testcase.get("overridden_fuzzer_name") or ""
         target = target_name(fuzzer)
@@ -319,6 +410,10 @@ def main():
                         help="days of statistics, ending yesterday (UTC) "
                              "(default 2)")
     parser.add_argument("--engine", choices=sorted(JOBS), default="libfuzzer")
+    parser.add_argument("--by-day", action="store_true",
+                        help="a row per target and day instead of totals")
+    parser.add_argument("--target", action="append", metavar="NAME",
+                        help="only this target, e.g. eval (repeatable)")
     parser.add_argument("--no-testcases", action="store_true",
                         help="skip the open testcases")
     args = parser.parse_args()
@@ -327,18 +422,31 @@ def main():
     date_end = today - datetime.timedelta(days=1)
     date_start = date_end - datetime.timedelta(days=max(args.days, 1) - 1)
 
+    # Accept ClusterFuzz's fuzzer names (libFuzzer_r_eval) as well.
+    targets = {target_name(t) for t in args.target or []}
+
     try:
         cookie = read_session()
         token = csrf_token(cookie)
-        rows = load_stats(cookie, token, args.engine, date_start, date_end)
-        print_stats(rows, args.engine, date_start, date_end)
+        if args.by_day:
+            days = load_daily_stats(
+                cookie, token, args.engine, date_start, date_end)
+            warn_missing(targets, [rows for _, rows in days])
+            days = [(d, select(rows, targets)) for d, rows in days]
+            print_daily_stats(days, args.engine)
+        else:
+            rows = load_stats(cookie, token, args.engine, date_start, date_end)
+            warn_missing(targets, [rows])
+            print_stats(
+                select(rows, targets), args.engine, date_start, date_end)
+
         if not args.no_testcases:
             print()
-            print_testcases(cookie, token)
+            print_testcases(cookie, token, targets)
     except SessionError as e:
         print(f"ossfuzz-status: {e}", file=sys.stderr)
         return 1
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         print(f"ossfuzz-status: request failed: {e}", file=sys.stderr)
         return 1
     return 0
