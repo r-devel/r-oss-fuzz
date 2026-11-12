@@ -270,7 +270,15 @@ cp -a "$R_PREFIX" "$OUT/r-install"
 # socketConnection(), curlGetHeaders(), the internal HTTP server) lives in
 # the loadable internet module, so dropping it from the bundled R_HOME turns
 # all of them into an ordinary R error ("unable to load shared object").
-rm -f "$OUT/r-install/lib/R/modules/internet.so"
+#
+# The sockets target is the one exception: it drives socket connections
+# over the loopback interface, where instrumentation/0006 keeps R's server
+# sockets.  So the module is not deleted but moved to
+# where R does not look, and that harness alone points R at it
+# (sockets_load_module in harnesses/sockets.c).
+mkdir -p "$OUT/r-install/lib/R/fuzz-internet/modules"
+mv "$OUT/r-install/lib/R/modules/internet.so" \
+    "$OUT/r-install/lib/R/fuzz-internet/modules/internet.so"
 
 ########################################################################
 # 2. Stage seed corpora

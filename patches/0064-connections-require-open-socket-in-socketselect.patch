@@ -1,0 +1,58 @@
+Require an open connection in socketSelect(), and give a new socket
+connection a defined descriptor and input buffer.
+
+in_R_newsock() (src/modules/internet/sockconn.c) allocates the sockconn
+struct with malloc() and leaves fd, pstart and pend for sock_open() to
+set.  do_sockselect() (src/main/connections.c) read all three without
+checking that the connection was open, so socketSelect() on a socket
+connection created with open = "", or one whose open() had failed, used
+whatever the allocation contained as a file descriptor: a negative
+value indexes the fd_set out of bounds in R_SocketWaitMultiple(), a
+large one gives "file descriptor is too large for select()", and a
+small one waits on an unrelated descriptor of the process.
+
+ASAN fills the first 4 KiB of every new allocation with 0xbe, so here
+the descriptor always reads as negative and the sockets target stops on
+its first input that selects an unopened connection:
+
+    s <- socketConnection(port = 8083L, open = "")
+    socketSelect(list(s), timeout = 0)
+
+Found by an external report rather than by a fuzzer; the sockets target
+(harnesses/sockets.c) was written because of it and reaches it at once.
+
+Upstream status: R Bugzilla 19298 (attachment 4041); r-devel/r-svn
+PR #475, filed 2026-11-12.  The upstream PR also adds a regression test
+to tests/reg-tests-1e.R, left out here so this carry patch does not go
+stale with that file.
+Delete this patch once the fix lands in R trunk.
+
+diff --git a/src/main/connections.c b/src/main/connections.c
+index 25b4bd92ec..a3a6d2d2fd 100644
+--- a/src/main/connections.c
++++ b/src/main/connections.c
+@@ -6916,6 +6916,9 @@ attribute_hidden SEXP do_sockselect(SEXP call, SEXP op, SEXP args, SEXP rho)
+ 	Rconnection conn = getConnection(asInteger(VECTOR_ELT(insock, i)));
+ 	if (!strcmp(conn->class, "sockconn")) {
+ 	    Rsockconn scp = conn->private;
++	    /* the descriptor and input buffer are only set up by sock_open() */
++	    if (!conn->isopen)
++		error(_("connection is not open"));
+ 	    INTEGER(insockfd)[i] = scp->fd;
+ 	    if (! LOGICAL(write)[i] && scp->pstart < scp->pend) {
+ 		LOGICAL(val)[i] = TRUE;
+diff --git a/src/modules/internet/sockconn.c b/src/modules/internet/sockconn.c
+index 6bd0351b9d..6289720211 100644
+--- a/src/modules/internet/sockconn.c
++++ b/src/modules/internet/sockconn.c
+@@ -251,6 +251,10 @@ Rconnection in_R_newsock(const char *host, int port, int server, int serverfd,
+     ((Rsockconn)new->private)-> timeout = timeout;
+     ((Rsockconn)new->private)-> serverfd = serverfd;
+     ((Rsockconn)new->private)-> options = options;
++    /* no descriptor and nothing buffered until sock_open() */
++    ((Rsockconn)new->private)-> fd = -1;
++    ((Rsockconn)new->private)-> pstart = ((Rsockconn)new->private)-> inbuf;
++    ((Rsockconn)new->private)-> pend = ((Rsockconn)new->private)-> inbuf;
+     return new;
+ }
+ 

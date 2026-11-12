@@ -61,6 +61,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `readtable`    | `read.table` / `read.csv` / `count.fields` / `write.table` — the header pre-reader, field counter and quoting writer in utils `io.c` that `scan` never reaches |
 | `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
+| `sockets`      | socket connections as a state machine over the loopback interface — `socketConnection` / `serverSocket` / `socketAccept` / `socketSelect` / `socketTimeout`, and reads and writes on sockets that were never opened, were refused, are connected, or have lost their peer (`sockconn.c`, `Rsock.c`, `connections.c`) |
 | `sort`         | `sort` / `order` / `rank` / `unique` / `match` — radix, shell and hash-based ordering (`sort.c`, `radixsort.c`, `unique.c`) |
 | `sprintf`      | `sprintf()` — C-style format-string parsing and dispatch |
 | `unserialize`  | `unserialize()` / `readRDS` — the deserializer (security-critical) |
@@ -124,14 +125,24 @@ export the same value first — R is otherwise uncapped on Linux, and any
 behaviour that depends on the "vector memory limit reached" error path
 will not reproduce without it.
 
-The R bundled into the fuzzer output has no `internet` module
-(`ossfuzz.sh` deletes `modules/internet.so` after staging `R_HOME`).
-Every network entry point -- `url()`, `download.file()`,
+The R bundled into the fuzzer output has no `internet` module where R
+looks for it (`ossfuzz.sh` moves `modules/internet.so` aside after staging
+`R_HOME`). Every network entry point -- `url()`, `download.file()`,
 `socketConnection()`, `curlGetHeaders()`, the internal HTTP server --
 loads that module on first use, so all of them fail with an ordinary R
-error in the fuzzers. No target calls them today; this makes sure a wider
-allowlist or a new target cannot start generating outbound traffic or
-DNS-timeout hangs by accident.
+error in the fuzzers. This makes sure a wider allowlist or a new target
+cannot start generating outbound traffic or DNS-timeout hangs by accident.
+
+The `sockets` target is the one deliberate exception. It loads the module
+from where it was moved to, and uses it on the loopback interface only: it
+connects to its own listening socket or to port 0, which refuses, and
+never resolves a host name. R's server sockets would listen on every
+interface, so `instrumentation/0006` binds them to 127.0.0.1, and no other
+host can reach the port the target holds while an input runs. R's socket
+code also waits in `select()` for up to a connection's timeout, so the
+harness creates every connection with `timeout = 0` and only connects or
+accepts where the answer is immediate; an operation that could wait would
+starve the fuzzer and be reported as a timeout.
 
 ## Adding or updating a target
 
@@ -186,6 +197,7 @@ fixes above are in place. Each header says what it is for. Currently:
 | `0003-memory-abort-on-freed-object-access` | the checked accessors `abort()` on a freed node instead of signalling an R error, which the harnesses would otherwise catch and discard like any rejected input |
 | `0004-sys-std-abort-on-fatal-error` | `R_Suicide()` aborts instead of exiting with status 2, so a fatal error gets a stack trace and deduplicates on it; the harnesses also set `_R_GC_FAIL_ON_ERROR_` so GC consistency failures take this path |
 | `0005-deparse-poll-for-interrupts` | `deparse` polls for interrupts every 1024 appends to its line buffer (freeing the buffer if the poll unwinds), so the `eval` target's budget can stop `as.character()` of a list nested tens of thousands deep, whose deparse is quadratic in the depth and otherwise runs for minutes; R itself never polls there |
+| `0006-sock-listen-on-loopback-only` | R's server sockets bind to 127.0.0.1 instead of every interface, so the listening port the `sockets` target holds while an input runs cannot be reached, or fed input, from another host |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.

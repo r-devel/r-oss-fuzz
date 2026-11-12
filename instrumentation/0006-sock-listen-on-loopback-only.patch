@@ -1,0 +1,30 @@
+Listen on the loopback interface only.
+
+Sock_open() (src/modules/internet/sock.c), behind serverSocket() and
+socketConnection(server = TRUE), binds to INADDR_ANY, so a listening
+socket accepts connections from any host the machine can be reached
+from.  The sockets target holds one for the duration of each input, and
+accepts whenever a connection it made itself is queued; a connection
+arriving from elsewhere in that window would be accepted in its place,
+and the target would then read whatever that host sends.  Bind to
+127.0.0.1 instead, which is where every connection the target makes
+goes.
+
+Instrumentation, not a fix: listening on every interface is what R's
+server sockets are for.  Not for upstream.
+
+diff --git a/src/modules/internet/sock.c b/src/modules/internet/sock.c
+index a5d799de33..51500214dc 100644
+--- a/src/modules/internet/sock.c
++++ b/src/modules/internet/sock.c
+@@ -255,7 +255,9 @@ int Sock_open(Sock_port_t port, int blocking, Sock_error_t perr)
+ 	return Sock_error(perr, R_socket_errno(), 0);
+     }
+     server.sin_family = AF_INET;
+-    server.sin_addr.s_addr = INADDR_ANY;
++    /* Only the fuzzing process itself may connect: a fuzzer listening on
++       every interface would let any host on the network feed it input. */
++    server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+     server.sin_port = htons((short)port);
+ 
+ #ifndef Win32
