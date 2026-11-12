@@ -22,6 +22,14 @@
 
 #define FUZZ_MAX_INPUT (1024 * 64)
 
+/* Largest decompressed size a text-reading slot may see.  readLines(n =)
+ * and scan(nmax =) bound the number of lines and fields, not their
+ * length, and bzip2 reaches ratios near a million to one, so a few
+ * hundred input bytes can inflate to a single line of tens of megabytes,
+ * which takes longer than the timeout to read under ASAN.  One MiB is
+ * far past every buffer size and growth step in the readers. */
+#define FUZZ_MAX_INFLATED (1024 * 1024)
+
 /* Encodings handed to file(encoding=).  "" means no re-encoding, the
  * others go through iconv in dummy_fgetc; UTF-8-BOM and UCS-2LE take the
  * byte-order-mark branches. */
@@ -53,7 +61,20 @@ static const char *const openers[N_OPENERS] = {
 #define N_CALLS (6 * N_ENCODINGS + 2 * N_OPENERS + 4)
 
 static SEXP calls[N_CALLS];
+/* The size check run before a slot, or NULL where the slot's reads are
+ * already bounded (readChar, readBin, the raw-vector slots). */
+static SEXP probes[N_CALLS];
 static char *scratch_path;
+
+/* Whether the scratch file inflates to at most cap bytes through opener.
+ * file() only switches to a decompressing reader when it is created with
+ * open = "", "r" or "rt", as the text slots create it; file(path, "rb")
+ * would count the compressed bytes, so the connection is opened after it
+ * is created. */
+static const char wrapper_probe[] =
+    "function(path, opener, cap) {"
+    "  con <- opener(path); on.exit(close(con)); open(con, 'rb');"
+    "  length(readBin(con, 'raw', cap + 1L)) <= cap }";
 
 /* Every wrapper takes (x, path, ...) so that fuzz_set_raw_arg can swap the
  * raw vector in at CADR regardless of which slot runs. */
@@ -193,7 +214,32 @@ int fuzz_target_init(int *argc, char ***argv)
     if (n != N_CALLS)
         abort();
     fuzz_label_calls(calls, N_CALLS);
+
+    /* readLines and scan through file(), and readLines through each
+     * opener, are the unbounded readers. */
+    SEXP w_probe, cap, file_opener, probe_file;
+    Rf_protect(w_probe = fuzz_make_wrapper(wrapper_probe));
+    Rf_protect(cap = Rf_ScalarInteger(FUZZ_MAX_INFLATED));
+    Rf_protect(file_opener = Rf_findFun(Rf_install("file"), R_BaseEnv));
+    Rf_protect(probe_file = Rf_lang4(w_probe, path, file_opener, cap));
+    for (int i = 0; i < 2 * N_ENCODINGS; i++)
+        probes[i] = probe_file;
+    for (int i = 4 * N_ENCODINGS; i < 6 * N_ENCODINGS; i++)
+        probes[i] = probe_file;
+    for (int i = 0; i < N_OPENERS; i++)
+        Rf_protect(probes[6 * N_ENCODINGS + N_OPENERS + i] =
+                       Rf_lang4(w_probe, path, opener[i], cap));
     return 0;
+}
+
+/* An error in the probe passes: the slot reads through the same decoder,
+ * so it fails at the same point, within the cap. */
+static int inflated_within_cap(SEXP probe)
+{
+    int error = 0;
+    fuzz_label_enter(probe);
+    SEXP within = R_tryEvalSilent(probe, R_GlobalEnv, &error);
+    return error || Rf_asLogical(within) == TRUE;
 }
 
 int fuzz_target_run(const uint8_t *data, size_t size)
@@ -203,6 +249,8 @@ int fuzz_target_run(const uint8_t *data, size_t size)
 
     int selected = data[0] % N_CALLS;
     if (!fuzz_write_scratch(scratch_path, data + 1, size - 1))
+        return 0;
+    if (probes[selected] != NULL && !inflated_within_cap(probes[selected]))
         return 0;
     if (!fuzz_set_raw_arg(calls[selected], data + 1, size - 1))
         return 0;

@@ -24,6 +24,13 @@
 #define FUZZ_MAX_INPUT (1024 * 64)
 #define N_CALLS 4
 
+/* Largest uncompressed size the extraction and text-read slots accept.
+ * minizip inflates an entry only up to the size its central-directory
+ * record states, which is what the listing reports as Length; bzip2
+ * entries let a few hundred bytes state, and produce, tens of megabytes,
+ * which takes longer than the timeout to write or read under ASAN. */
+#define FUZZ_MAX_INFLATED (1024 * 1024)
+
 /* Both paths stay reachable from here for the life of the process, so
  * LeakSanitizer does not report them at exit. */
 static char *scratch_path;
@@ -34,7 +41,7 @@ static SEXP calls[N_CALLS];
  * every entry inside it regardless of the path stored in the archive,
  * and the wrapper empties it again on exit (error or not) so one
  * iteration's files never collide with the next.  Output volume is
- * bounded by the deflate ratio (~1000:1) times the input cap. */
+ * bounded by FUZZ_MAX_INFLATED. */
 static char *make_scratch_dir(void)
 {
     const char *tmpdir = getenv("TMPDIR");
@@ -67,34 +74,40 @@ int fuzz_target_init(int *argc, char ***argv)
      * [1] extraction: local headers and inflate (zipunzip/extract_one).
      * [2] unz() connection, binary read of the first entry.
      * [3] unz() connection, text read of the first entry.
-     * The readBin/readLines caps bound how much of a bomb is inflated. */
+     * readBin's count bounds slot 2; readLines(n =) bounds lines, not
+     * their length, so slots 1 and 3 check the listed sizes against cap
+     * first.  An archive whose listing fails is not extracted: extraction
+     * walks the same central directory, which slot 0 covers. */
     static const char *const sources[N_CALLS] = {
-        "function(path, exdir) "
+        "function(path, exdir, cap) "
         "utils::unzip(path, list = TRUE, unzip = \"internal\")",
 
-        "function(path, exdir) { "
+        "function(path, exdir, cap) { "
+        "l <- utils::unzip(path, list = TRUE, unzip = \"internal\"); "
+        "if (sum(l$Length) > cap) return(NULL); "
         "on.exit(unlink(list.files(exdir, all.files = TRUE, "
         "full.names = TRUE, no.. = TRUE), recursive = TRUE)); "
         "utils::unzip(path, exdir = exdir, junkpaths = TRUE, "
         "unzip = \"internal\") }",
 
-        "function(path, exdir) { "
+        "function(path, exdir, cap) { "
         "l <- utils::unzip(path, list = TRUE, unzip = \"internal\"); "
         "if (nrow(l)) { con <- unz(path, l$Name[1], open = \"rb\"); "
         "on.exit(close(con)); readBin(con, \"raw\", 65536L) } }",
 
-        "function(path, exdir) { "
+        "function(path, exdir, cap) { "
         "l <- utils::unzip(path, list = TRUE, unzip = \"internal\"); "
-        "if (nrow(l)) { con <- unz(path, l$Name[1]); on.exit(close(con)); "
-        "readLines(con, n = 1024L, warn = FALSE) } }",
+        "if (nrow(l) && l$Length[1] <= cap) { con <- unz(path, l$Name[1]); "
+        "on.exit(close(con)); readLines(con, n = 1024L, warn = FALSE) } }",
     };
-    SEXP path, exdir_string;
+    SEXP path, exdir_string, cap;
     Rf_protect(path = Rf_mkString(scratch_path));
     Rf_protect(exdir_string = Rf_mkString(scratch_dir));
+    Rf_protect(cap = Rf_ScalarInteger(FUZZ_MAX_INFLATED));
     for (int i = 0; i < N_CALLS; i++) {
         SEXP wrapper;
         Rf_protect(wrapper = fuzz_make_wrapper(sources[i]));
-        Rf_protect(calls[i] = Rf_lang3(wrapper, path, exdir_string));
+        Rf_protect(calls[i] = Rf_lang4(wrapper, path, exdir_string, cap));
     }
     fuzz_label_calls(calls, N_CALLS);
     return 0;
