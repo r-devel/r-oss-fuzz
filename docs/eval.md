@@ -19,27 +19,59 @@ and `function`, assignment with `<-` and `=`, arithmetic, comparison and
 logical operators, `c`, `list`, the three subsetting operators and their
 replacement forms, the `is.*`/`as.*` predicates and coercions, a few
 elementwise maths functions, `sum`/`prod`/`min`/`max`/`any`/`all`, and
-`invisible`. Its parent is `emptyenv()`. The harness checks at start-up that
-every imported binding really is a primitive, because importing a base
-closure would also import the base namespace it closes over, and everything
-reachable from there.
+`invisible`. Since 2026-11 it also holds `quote`, `substitute`, `missing`,
+`nargs` and `switch`; the attribute accessors `attr`,
+`attributes`, `names`, `dim`, `dimnames`, `class`, `oldClass` and `unclass`
+with the setters for names, dim, dimnames and levels; `UseMethod`; and
+`rep` and `seq_along`. Its parent is `emptyenv()`. The harness checks at
+start-up that every imported binding really is a primitive, because
+importing a base closure would also import the base namespace it closes
+over, and everything reachable from there.
 
-`:` is the one exception: it is a closure, not the primitive. A compact
-ALTREP sequence costs nothing to create at any length, and the reductions
-without an ALTREP shortcut (`prod`, or `min`/`max`/`sum` with two arguments)
-then walk a billion elements in C with no interrupt check: 8 to 18 seconds
-under ASAN, invisible to the budget below and a certain timeout report. The
-wrapper refuses sequences of a million elements or more, measured from the
-first element of each argument as `:` itself does, and otherwise calls the
-primitive. Its enclosure is a private environment holding only what its
-body names, so it adds no capability.
+Five names are closures standing in for the primitive, bound in a frame of
+their own below the allowlist with a shared private enclosure that holds
+only what their bodies name, so they add no capability. `:`, `seq_len` and
+`seq.int` are length-capped: a compact ALTREP sequence costs nothing to
+create at any length, and the reductions without an ALTREP shortcut
+(`prod`, or `min`/`max`/`sum` with two arguments) then walk a billion
+elements in C with no interrupt check: 8 to 18 seconds under ASAN,
+invisible to the budget below and a certain timeout report. `:` refuses
+more than a million elements measured from the first element of each
+argument, as `:` itself does; `seq_len` and `seq.int` have more argument
+forms and are measured on their result, which is free to build. `rep`
+allocates its result, so the heap bounds it. `attr<-` and `attributes<-`
+refuse the class attribute, and `class<-` and `oldClass<-` are not imported
+at all. An object with a class attribute would dispatch every internal
+generic in the allowlist (`[`, `+`, `length`, `c`, ...) to the S3 methods
+base registers for that class, `[.data.frame` or `Ops.Date` or
+`$.DLLInfo`: closures over the base namespace running on input-shaped
+data, where a crash on `class(x) <- "DLLInfo"` is the "you asked for it"
+report this target is meant not to produce, and which would need their own
+look at what they hand back to the input. `UseMethod` dispatches on the
+implicit class instead (`matrix`, `integer`, `function`, ...), to methods
+the input defines, which is the dispatch code the allowlist is for.
+
+The method sees `.GenericDefEnv`, the top environment of the generic's
+enclosure, which here is the allowlist frame itself. Its bindings are
+locked, but attributes are not bindings, and the frame's name attribute is
+what `topenv()` recognises it by: with the name gone, `topenv()` falls back
+to the global environment, and `UseMethod`'s lookup from there reaches
+base's own S3 methods (`with.default` evaluates its argument with all of
+base in scope). So the two wrappers also refuse environments, the other
+setters in the allowlist either reject environments or set only their own
+attribute, and the frame carries a locked `.packageName` binding, which
+`topenv()` accepts on its own, so recognition never rests on an attribute.
+What is left is `levels<-`, which can hang a heap-sized attribute on the
+frame that would outlive the input, so the harness puts the frame's
+attributes back after every input.
 
 There are no bindings for filesystem, network or process access, `.Internal`,
-`.Call` and friends, namespace or package loading, `eval`/`quote`/`substitute`,
-environment accessors or `<<-`, attribute and class setters, S3/S4 dispatch,
-`options`, or time limits. These are capability restrictions, not a denylist
-over the source text: `base::system` fails because `::` is unbound. Closures
-the input defines inherit the restricted environment, and primitive names can
+`.Call` and friends, namespace or package loading, `eval`, environment
+accessors or `<<-`, class setters, `on.exit`, `NextMethod` or S4 dispatch,
+`options`, or time limits. Language objects from `quote` and `substitute` are inert
+without `eval`. These are capability restrictions, not a denylist over the
+source text: `base::system` fails because `::` is unbound. Closures the
+input defines inherit the restricted environment, and primitive names can
 be shadowed only in the input's own environment, which the next input never
 sees. No default packages are attached, so nothing could leak through a
 method lookup; the JIT is off because the harness compiles explicitly, as
@@ -79,16 +111,18 @@ only for names it finds in a frame it classifies as base, going by the
 frame's `name` attribute. The allowlist frame therefore carries the name of
 base's package frame. Its bindings are base's own primitives, so the
 `BASEGUARD` check compiled code makes before an inlined builtin call passes,
-and a name the input rebinds is still looked up like any other. The `:`
-wrapper lives in a separate frame below the allowlist, which the compiler
-classifies as local and so calls rather than inlining; the `COLON`
-instruction would bypass the cap. Finally, the compiler's `isBaseVar()`
+and a name the input rebinds is still looked up like any other. The
+wrappers live in a separate frame below the allowlist, which the compiler
+classifies as local and so calls rather than inlining or constant-folding;
+the `COLON` and `SEQLEN` instructions, and `prod(seq_len(1e9))` folded at
+compile time, would bypass the caps. Finally, the compiler's `isBaseVar()`
 compares frames by identity with `baseenv()`, which decides whether a
 `break` or `next` inside a conditional compiles to a jump or to a loop
 context; it is rebound in the compiler namespace to accept the named frame,
 so loops compile the way a session's do. `tests/eval.c` checks all of this:
 closures come back with byte-code bodies, a loop with a conditional break
-has no `STARTLOOPCNTXT`, and every bound below holds on the compiled path.
+has no `STARTLOOPCNTXT`, `seq_along` is inlined where `seq_len` is called,
+and every bound below holds on the compiled path.
 
 The compiler's own code is byte-compiled base R and runs under the same
 budget as the code it produces; a compile the budget cuts off ends the input
@@ -152,8 +186,21 @@ With all three, the worst inputs found so far (`repeat !x` over a 4 MB
 vector, `repeat as.character(x)` over 100k doubles) end in under half a
 second under ASAN.
 
-The budget cannot see C loops that never poll, which is why `:` is capped;
-nothing else in the allowlist builds a long vector without allocating it.
+The budget error ends the input only because no input code runs once it
+is raised: the check switches itself off, and nothing in the allowlist can
+intercept the unwind. That is why `on.exit` is not in it. Its expressions
+would run during the unwind with the check off, so `on.exit(repeat {})`
+would run until libFuzzer's timeout (`setTimeLimit()` has exactly this gap
+in plain R), and reloading the check with a grace does not help, because
+`on.exit(return(1))` redirects the unwind back into the function:
+`h <- function() { on.exit(return(1)); repeat {} }; repeat h()` swallows
+every budget error and never ends. Ending such an input needs a path R
+code cannot redirect, which means a fuzzing-only change to
+`R_run_onexits` under `instrumentation/`, not an allowlist entry.
+
+The budget cannot see C loops that never poll, which is why `:`, `seq_len`
+and `seq.int` are capped; nothing else in the allowlist builds a long
+vector without allocating it.
 The other way to spend unbounded time without polling is depth rather
 than length: `as.character()` of a list nested tens of thousands deep
 (built in a loop, well within the budget) deparses it, and deparse's
@@ -203,17 +250,27 @@ unusual argument types and magnitudes to C entry points, not from the
 interpreter proper. Of those, only the subscript overflow is reachable
 through this allowlist. The value of an evaluation target is argument-space
 coverage of builtins that the string-driven targets cannot provide, so the
-allowlist should widen once this target has run quietly:
+allowlist widens in tiers, each once the target has run quietly on the one
+before:
 
-1. **Inert language objects and attributes**: `quote`, `substitute`,
-   `missing`, `nargs`, `switch`, `rep`, `seq_len`, `seq_along`, `names<-`,
-   `dim<-`, `attr`, `attr<-`, `class<-`, `oldClass<-`, `unclass`,
-   `attributes<-`, `levels<-`, `UseMethod`, `on.exit`. Language objects are
-   inert without `eval`, and attributes plus `UseMethod` open up S3
-   dispatch, where a good share of historical interpreter crashes live.
-   `all(quote(x))` is in this tier. `seq_len` and `seq.int` build compact
-   sequences like `:` and need the same wrapper, in the same wrappers frame:
-   the compiler has instructions for both and would otherwise inline them.
+1. **Inert language objects, attributes and dispatch** (done, 2026-11):
+   `quote`, `substitute`, `missing`, `nargs`, `switch`, `rep`, `seq_len`,
+   `seq.int`, `seq_along`, the attribute accessors and setters other than
+   class, and `UseMethod`. Language objects are inert without `eval`;
+   attributes exercise `attrib.c` and the dim/names handling in `subset.c`
+   and `subassign.c`; `UseMethod` on the implicit class exercises
+   `objects.c` with methods the input defines. `all(quote(x))` is in this
+   tier. Two things it deliberately leaves out. The class attribute:
+   `class<-`, `oldClass<-`, and `attr<-`/`attributes<-` for `"class"`. A
+   classed object dispatches the internal generics to base's own S3
+   methods, which are closures over the base namespace, so letting it in
+   means deciding that a crash in `[.data.frame` on a number wearing the
+   class is a report worth filing, and checking what those methods can
+   hand back to the input. And `on.exit`, which can redirect the budget's
+   unwind (see Limits) and so needs a fuzzing-only change to
+   `R_run_onexits` that lets the harness drop pending handlers once an
+   input is over its budget. Both are decisions still to make, not
+   oversights.
 2. **Every remaining computational primitive**: the full `names.c` table
    minus the capability set (`.Internal`, `.External*`, `.Call`, `.C`,
    `.Fortran`, `.Primitive`, `environment<-`, `as.environment`, `baseenv`,

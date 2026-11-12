@@ -6,8 +6,8 @@
  * subassign.c, coerce.c, arithmetic.c).  Each input is evaluated in a new
  * environment whose locked parent holds a small allowlist of primitives,
  * so the input can define closures, build and index vectors, loop and
- * branch, but cannot reach I/O, native calls, namespaces, reflection or
- * process-global state.
+ * branch, set attributes and dispatch S3 methods of its own, but cannot
+ * reach I/O, native calls, namespaces, reflection or process-global state.
  *
  * The allowlist is not a security sandbox -- it cannot contain a bug in
  * the interpreter -- and does not need to be: the fuzzing host is
@@ -50,8 +50,11 @@
  * budget's unit of work is too coarse; see eval_poll_budget. */
 #define FUZZ_EVAL_CPU_LIMIT 1.0
 
-/* The allowlist frame, the wrappers frame below it, and compiler::compile. */
+/* The allowlist frame, the wrappers frame below it, compiler::compile, and
+ * the closure that puts the allowlist frame's attributes back, with the
+ * attributes it puts back. */
 static SEXP eval_builtins, eval_wrappers, eval_compile_fn;
+static SEXP eval_reset_builtins_fn, eval_builtins_attributes;
 
 /* Remaining interrupt checks for the current input; 0 means no limit. */
 static long eval_budget;
@@ -59,9 +62,11 @@ static clock_t eval_cpu_start;
 
 /* Only primitives: importing a base closure would also import its enclosing
  * namespace and the capabilities reachable through its implementation.
- * No class/attribute setters or reflection/metaprogramming APIs are exposed.
- * Closures created by the input inherit only the restricted environment.
- * `:` is provided separately, through a length-capped wrapper (below).
+ * No reflection or metaprogramming APIs are exposed; language objects from
+ * quote() and substitute() are inert without eval().  Closures created by
+ * the input inherit only the restricted environment.  `:`, seq_len,
+ * seq.int, `attr<-` and `attributes<-` are provided separately, through
+ * wrappers (below); class<- and oldClass<- not at all.
  */
 static const char *const eval_primitives[] = {
     "{", "(", "if", "for", "while", "repeat", "break", "next",
@@ -73,47 +78,138 @@ static const char *const eval_primitives[] = {
     "is.complex", "is.character", "is.list", "is.na", "is.nan", "is.finite",
     "is.infinite", "as.integer", "as.double", "as.logical", "as.character",
     "as.complex", "as.raw", "abs", "sqrt", "floor", "ceiling", "trunc",
-    "sum", "prod", "min", "max", "any", "all", "invisible"
+    "sum", "prod", "min", "max", "any", "all", "invisible",
+    /* Language objects, argument introspection and switch.  Not on.exit:
+     * its code runs during the unwind the budget error starts, and
+     * on.exit(return(1)) redirects that unwind back into the function, so
+     * `h <- function() { on.exit(return(1)); repeat {} }; repeat h()` would
+     * swallow every budget error and never end.  Letting it in needs a
+     * way to end an input that R code cannot redirect, which is an
+     * instrumentation/ change to R_run_onexits, not an allowlist entry. */
+    "quote", "substitute", "missing", "nargs", "switch",
+    /* Attributes other than class; see the wrappers for `attr<-`. */
+    "attr", "attributes", "names", "names<-", "dim", "dim<-", "dimnames",
+    "dimnames<-", "levels<-", "unclass", "class", "oldClass",
+    /* S3 dispatch on the implicit class to methods the input defines;
+     * .GenericDefEnv is the allowlist frame itself, see eval_reset_builtins.
+     * NextMethod is a closure and is not imported. */
+    "UseMethod",
+    /* rep allocates its result, so the vector heap bounds it; the compact
+     * sequence builders are wrapped below. */
+    "rep", "seq_along"
 };
 
 /*
- * `:` is wrapped rather than imported.  A compact ALTREP sequence costs
- * nothing to create whatever its length, and the reductions without an
- * ALTREP shortcut (prod, or min/max/sum with two arguments) then walk
- * 1e9 elements in C without an interrupt check: 8-18 s under ASAN, which
- * the budget cannot see and ClusterFuzz would file as a timeout.  Nothing
+ * Wrappers: closures standing in for primitives whose plain form would
+ * get past a limit.  Each is bound in eval_wrappers, a frame of its own
+ * below the allowlist, because the compiler inlines and constant-folds
+ * calls to names it finds in the base-like frame (the COLON and SEQLEN
+ * instructions; `:`, seq_len, seq.int and rep are in its foldFuns), and
+ * an inlined call would bypass the wrapper (see eval_compile).  The
+ * wrappers share one private enclosure holding only the primitives their
+ * bodies name (`function` included: it is a primitive looked up like any
+ * other), the wrapped primitives under dotted names, and .Internal, bound
+ * there to raise the errors and nowhere the input can see.  So they add
+ * no capability.
+ *
+ * `:`, seq_len and seq.int build compact ALTREP sequences, which cost
+ * nothing to create whatever their length; the reductions without an
+ * ALTREP shortcut (prod, or min/max/sum with two arguments) then walk 1e9
+ * elements in C without an interrupt check: 8-18 s under ASAN, which the
+ * budget cannot see and ClusterFuzz would file as a timeout.  Nothing
  * else in the allowlist builds a long vector without allocating it, and
- * allocation is bounded by the vector heap.
+ * allocation is bounded by the vector heap.  `:` is capped on what it
+ * uses: the first element of each argument, as a double, so a longer
+ * vector or a character argument (`c(1e12, 1):5`, `"1":"1e9"`) is bounded
+ * like a scalar.  seq_len and seq.int have more argument forms, so they
+ * are capped on the result instead: building it is free, and its length
+ * is known before anything walks it.
  *
- * The cap measures what `:` itself uses: the first element of each
- * argument, as a double, so a longer vector or a character argument
- * (`c(1e12, 1):5`, `"1":"1e9"`) is bounded like a scalar.  The earlier
- * guard only applied to two length-1 arguments and let those through.
- *
- * The wrapper's enclosure holds only what its definition and body name
- * (`function` included: it is a primitive looked up like any other), so
- * it adds no capability.  .Internal is bound there to raise the error,
- * and nowhere the input can see.
- *
- * The wrapper is bound in eval_wrappers, a frame of its own below the
- * allowlist: the compiler inlines calls to names it finds in the base-like
- * frame, and the COLON instruction would bypass the cap (see eval_compile).
+ * `attr<-` and `attributes<-` refuse two things.  The class attribute: an
+ * object with one dispatches every internal generic in the allowlist
+ * (`[`, `+`, `length`, `c`, ...) to the S3 methods base registers for its
+ * classes -- `[.data.frame`, `Ops.Date`, `$.DLLInfo` -- which are closures
+ * over the base namespace running on input-shaped data, and a crash in
+ * one of them on `class(x) <- "DLLInfo"` is the "you asked for it" report
+ * this target is meant not to produce.  UseMethod dispatches on the
+ * implicit class (matrix, integer, function, ...) to methods the input
+ * defines, which is the dispatch code this allowlist is for.  And
+ * environments: UseMethod hands the method .GenericDefEnv, which is the
+ * allowlist frame itself, whose bindings are locked but whose attributes
+ * are not (see eval_reset_builtins).  The other setters in the allowlist
+ * either reject environments (names<-, dim<-, dimnames<-) or set only
+ * their own attribute (levels<-).
  */
 static const char *const eval_wrapper_primitives[] = {
-    "function", "{", "if", "&&", ">=", "-", "<-", "length", "[[", "as.double",
-    "is.finite", "abs", ".Internal"
+    "function", "{", "if", "&&", "||", ">=", ">", "==", "-", "<-", "length",
+    "[[", "as.double", "is.finite", "abs", "is.character", "is.na", "!",
+    "any", "names", "is.environment", ".Internal"
 };
 
-static const char *const eval_colon_source =
-    "function(from, to) {\n"
-    "    if (length(from) >= 1L && length(to) >= 1L) {\n"
-    "        f <- as.double(from[[1L]])\n"
-    "        t <- as.double(to[[1L]])\n"
-    "        if (is.finite(f) && is.finite(t) && abs(t - f) >= 1e6)\n"
-    "            .Internal(stop(TRUE, \"sequence too long for the eval target\"))\n"
-    "    }\n"
-    "    .colon(from, to)\n"
-    "}";
+static const char eval_colon_source[] = R"(
+function(from, to) {
+    if (length(from) >= 1L && length(to) >= 1L) {
+        f <- as.double(from[[1L]])
+        t <- as.double(to[[1L]])
+        if (is.finite(f) && is.finite(t) && abs(t - f) >= 1e6)
+            .Internal(stop(TRUE, "sequence too long for the eval target"))
+    }
+    .colon(from, to)
+}
+)";
+
+static const char eval_seq_len_source[] = R"(
+function(length.out) {
+    x <- .seq_len(length.out)
+    if (length(x) > 1e6)
+        .Internal(stop(TRUE, "sequence too long for the eval target"))
+    x
+}
+)";
+
+static const char eval_seq_int_source[] = R"(
+function(...) {
+    x <- .seq_int(...)
+    if (length(x) > 1e6)
+        .Internal(stop(TRUE, "sequence too long for the eval target"))
+    x
+}
+)";
+
+static const char eval_attr_set_source[] = R"(
+function(x, which, value) {
+    if (is.environment(x))
+        .Internal(stop(TRUE, "attributes of environments cannot be set in the eval target"))
+    if (is.character(which) && length(which) == 1L && !is.na(which) &&
+        which == "class")
+        .Internal(stop(TRUE, "the class attribute is not available in the eval target"))
+    .attr_set(x, which, value = value)
+}
+)";
+
+static const char eval_attributes_set_source[] = R"(
+function(x, value) {
+    if (is.environment(x))
+        .Internal(stop(TRUE, "attributes of environments cannot be set in the eval target"))
+    if (any(names(value) == "class"))
+        .Internal(stop(TRUE, "the class attribute is not available in the eval target"))
+    .attributes_set(x, value)
+}
+)";
+
+typedef struct {
+    const char *name;       /* bound in eval_wrappers */
+    const char *primitive;  /* the primitive, bound in the private enclosure */
+    const char *source;
+} eval_wrapper_t;
+
+static const eval_wrapper_t eval_wrapper_table[] = {
+    { ":", ".colon", eval_colon_source },
+    { "seq_len", ".seq_len", eval_seq_len_source },
+    { "seq.int", ".seq_int", eval_seq_int_source },
+    { "attr<-", ".attr_set", eval_attr_set_source },
+    { "attributes<-", ".attributes_set", eval_attributes_set_source },
+};
 
 typedef struct {
     const uint8_t *data;
@@ -153,7 +249,9 @@ typedef struct {
  * from inside R_ProcessEvents is what R_CheckTimeLimits does, so the
  * interpreter is prepared for a longjmp at this point.  The budget is
  * zero by the time either error is raised, which switches the check off,
- * so nothing on the error path can re-enter it.
+ * so nothing on the error path can re-enter it.  No input code runs once
+ * the error is raised: there are no handlers or on.exit in the allowlist,
+ * and that is a condition of this design (see eval_primitives).
  */
 static void eval_poll_budget(void)
 {
@@ -167,6 +265,44 @@ static void eval_poll_budget(void)
         eval_budget = 0;
         Rf_error("evaluation CPU limit exhausted");
     }
+}
+
+/* UseMethod() binds .GenericDefEnv in the method's frame to the top
+ * environment of the generic's enclosure, which here is the allowlist frame
+ * itself.  Its bindings are locked, but attributes are not bindings.  Two
+ * things keep that harmless.  The wrappers for attr<- and attributes<-
+ * refuse environments, so the input cannot take away the frame's name,
+ * which topenv() would otherwise stop recognising -- it then falls back to
+ * R_GlobalEnv, and UseMethod's method lookup from there reaches base's own
+ * S3 methods (with.default evaluates its argument with the whole of base
+ * in scope).  And the frame carries a locked .packageName binding, which
+ * topenv() accepts on its own, so recognition never rests on an attribute
+ * at all.  What is left is levels<-, which can hang a heap-sized attribute
+ * on the frame that would outlive the input; so the attributes are put
+ * back after every input.  (.GenericCallEnv is the caller's frame, the
+ * input's own.)  Through R, since the attribute list is not reachable from
+ * the public API; in two steps with a preserved value, so that nothing is
+ * allocated while an attribute the input left may be filling the heap. */
+static const char eval_reset_builtins_source[] = R"(
+function(env, value) {
+    attributes(env) <- NULL
+    attributes(env) <- value
+}
+)";
+
+static void eval_reset_builtins(void)
+{
+    SEXP call;
+    Rf_protect(call = Rf_lang3(eval_reset_builtins_fn, eval_builtins,
+                               eval_builtins_attributes));
+    Rf_eval(call, R_BaseEnv);
+    Rf_unprotect(1);
+}
+
+static void eval_reset_builtins_exec(void *unused)
+{
+    (void)unused;
+    eval_reset_builtins();
 }
 
 /* The allowlist is only ever primitives (see eval_primitives): a name that
@@ -303,35 +439,42 @@ static int eval_tree_within_budget(SEXP x, unsigned depth, unsigned *nodes)
  * without that every loop with a conditional break would compile with a
  * context, which a session's would not.
  */
-static const char *const eval_compiler_setup =
-    "local({\n"
-    "    ns <- asNamespace(\"compiler\")\n"
-    "    isBaseVar <- function(var, cntxt) {\n"
-    "        info <- getInlineInfo(var, cntxt)\n"
-    "        !is.null(info) &&\n"
-    "            (identical(info$frame, .BaseNamespaceEnv) ||\n"
-    "             identical(info$frame, baseenv()) ||\n"
-    "             packFrameName(info$frame) == \"base\")\n"
-    "    }\n"
-    "    environment(isBaseVar) <- ns\n"
-    "    unlockBinding(\"isBaseVar\", ns)\n"
-    "    assign(\"isBaseVar\", isBaseVar, envir = ns)\n"
-    "    lockBinding(\"isBaseVar\", ns)\n"
-    "    compiler::compile\n"
-    "})";
+static const char eval_compiler_setup[] = R"(
+local({
+    ns <- asNamespace("compiler")
+    isBaseVar <- function(var, cntxt) {
+        info <- getInlineInfo(var, cntxt)
+        !is.null(info) &&
+            (identical(info$frame, .BaseNamespaceEnv) ||
+             identical(info$frame, baseenv()) ||
+             packFrameName(info$frame) == "base")
+    }
+    environment(isBaseVar) <- ns
+    unlockBinding("isBaseVar", ns)
+    assign("isBaseVar", isBaseVar, envir = ns)
+    lockBinding("isBaseVar", ns)
+    compiler::compile
+})
+)";
 
 /* Run once at start-up, so the compiler's lazily loaded internals are in
  * memory before the first input and every input sees the same R. */
-static const char *const eval_warmup_source =
-    "f <- function(n) {\n"
-    "    s <- 0\n"
-    "    for (i in 1:n) if (i %% 2 == 0) s <- s + i else next\n"
-    "    s\n"
-    "}\n"
-    "x <- c(f(10), 1)\n"
-    "x[[2]] <- x[1]\n"
-    "g <- function(...) list(...)\n"
-    "g(x, repeat break)\n";
+static const char eval_warmup_source[] = R"(
+f <- function(n) {
+    s <- 0
+    for (i in 1:n) if (i %% 2 == 0) s <- s + i else next
+    s
+}
+x <- c(f(10), 1)
+x[[2]] <- x[1]
+g <- function(...) list(...)
+g(x, repeat break)
+h <- function(x) UseMethod("h")
+h.default <- function(x) switch(class(x), numeric = nargs(), 2)
+h.function <- function(x) attr(unclass(x), "srcref")
+h(x); h(g)
+y <- seq_len(3); names(y) <- c("a", "b", "c"); dim(y) <- 3L; y[[2L]]
+)";
 
 /* Byte-code for expr, or expr itself if the compiler declined it.
  *
@@ -396,6 +539,7 @@ static SEXP eval_source(const eval_input_t *input, int *error)
             break;
     }
     eval_budget = 0;
+    eval_reset_builtins();
 
     Rf_unprotect(3);
     return *error ? R_NilValue : result;
@@ -410,9 +554,11 @@ static void eval_one(void *data)
 static void eval_run(const uint8_t *data, size_t size)
 {
     eval_input_t input = { data, size };
-    R_ToplevelExec(eval_one, &input);
-    /* A jump past eval_source (an interrupt, not an error) skips its reset. */
-    eval_budget = 0;
+    /* A jump past eval_source (an interrupt, not an error) skips its resets. */
+    if (!R_ToplevelExec(eval_one, &input)) {
+        eval_budget = 0;
+        R_ToplevelExec(eval_reset_builtins_exec, NULL);
+    }
 }
 
 int fuzz_target_init(int *argc, char ***argv)
@@ -427,22 +573,36 @@ int fuzz_target_init(int *argc, char ***argv)
         setenv("R_VSIZE", FUZZ_R_MAX_VSIZE, 1);
     fuzz_init_r();
 
+    eval_reset_builtins_fn = eval_run_init(eval_reset_builtins_source, R_BaseEnv);
+    R_PreserveObject(eval_reset_builtins_fn);
+    eval_builtins_attributes = eval_run_init("list(name = \"package:base\")", R_BaseEnv);
+    R_PreserveObject(eval_builtins_attributes);
     Rf_protect(eval_builtins = R_NewEnv(R_EmptyEnv, TRUE, 97));
-    Rf_setAttrib(eval_builtins, R_NameSymbol, Rf_mkString("package:base"));
+    eval_reset_builtins();
     eval_import_primitives(eval_builtins, eval_primitives,
                            sizeof(eval_primitives) / sizeof(*eval_primitives));
+    /* topenv() recognises a frame by this binding as well as by its name
+     * attribute; the binding is the one the input cannot touch. */
+    Rf_defineVar(Rf_install(".packageName"), Rf_mkString("base"), eval_builtins);
     R_LockEnvironment(eval_builtins, TRUE);
 
     Rf_protect(eval_wrappers = R_NewEnv(eval_builtins, TRUE, 29));
-    SEXP private_env, colon;
+    SEXP private_env;
+    size_t n_wrappers = sizeof(eval_wrapper_table) / sizeof(*eval_wrapper_table);
     Rf_protect(private_env = R_NewEnv(R_EmptyEnv, TRUE, 29));
     eval_import_primitives(private_env, eval_wrapper_primitives,
                            sizeof(eval_wrapper_primitives) / sizeof(*eval_wrapper_primitives));
-    Rf_defineVar(Rf_install(".colon"), eval_primitive(":"), private_env);
+    for (size_t i = 0; i < n_wrappers; i++)
+        Rf_defineVar(Rf_install(eval_wrapper_table[i].primitive),
+                     eval_primitive(eval_wrapper_table[i].name), private_env);
     R_LockEnvironment(private_env, TRUE);
-    Rf_protect(colon = eval_run_init(eval_colon_source, private_env));
-    Rf_defineVar(Rf_install(":"), colon, eval_wrappers);
-    Rf_unprotect(2);
+    for (size_t i = 0; i < n_wrappers; i++) {
+        SEXP wrapper;
+        Rf_protect(wrapper = eval_run_init(eval_wrapper_table[i].source, private_env));
+        Rf_defineVar(Rf_install(eval_wrapper_table[i].name), wrapper, eval_wrappers);
+        Rf_unprotect(1);
+    }
+    Rf_unprotect(1);
     R_LockEnvironment(eval_wrappers, TRUE);
 
     eval_compile_fn = eval_run_init(eval_compiler_setup, R_BaseEnv);
