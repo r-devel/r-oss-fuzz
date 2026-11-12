@@ -1,0 +1,5 @@
+# The harness rejects inputs over 192 bytes, 64 three-byte operations
+# (FUZZ_MAX_INPUT in harnesses/sockets.c); tell libFuzzer so it does not
+# spend mutations on inputs that will be skipped.
+[libfuzzer]
+max_len = 192
