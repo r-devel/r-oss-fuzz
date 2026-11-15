@@ -146,7 +146,7 @@ internals before fuzzing begins, so every input sees the same R.
 | compilation | the input's budget and CPU backstop, like execution | the same hook; `eval_source` ends the input |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
-| recursion | R's `expressions` limit and C stack check, against the R thread's 1 GiB stack | R; an ordinary R error |
+| recursion | R's `expressions` limit and its C stack check at 48 MiB, on the R thread's 1 GiB stack | R; an ordinary R error |
 
 The execution budget is counted in work, not time. R calls
 `R_CheckUserInterrupt()` at a fixed interval of evaluations in the AST
@@ -211,7 +211,17 @@ deparse's buffer so the budget and the CPU backstop reach it.
 Unbounded recursion is left to R. `f <- function() f(); f()` hits the
 `expressions` limit (5000) long before the C stack under ASAN, where
 `R_CheckStack()` in `eval()` would otherwise catch it; both are plain R
-errors and both were checked against an ASAN build. C recursion that R
+errors and both were checked against an ASAN build. Recursion through
+`UseMethod()` is different: byte-code runs a call to a compiled closure in
+the same C frame, but each dispatch recurses in C, so
+`g.default <- function(x) UseMethod("g")` needs over 64 MiB of stack
+under ASAN to reach the `expressions` limit. That is why the C stack check
+stops at 48 MiB (`FUZZ_R_CSTACK_LIMIT` in `common.h`) rather than near the
+end of the stack. ASAN does not unpoison the frames an R error abandons
+beyond 64 MiB (it warns `ASan is ignoring requested
+__asan_handle_no_return`), and their stale redzones made the harness's
+own reset after such an input fail as a stack-buffer-overflow in
+`EnsureLocal()`, oss-fuzz testcase 5678622682447872. C recursion that R
 does not check -- `c(x, recursive = TRUE)` or `as.character(x)` over a
 list the input nested a hundred thousand deep in a loop -- is absorbed by
 the R thread's 1 GiB stack (`common.h`), which outlasts any nesting the

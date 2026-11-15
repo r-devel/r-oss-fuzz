@@ -172,6 +172,23 @@ static void fuzz_set_vsize_limit(void)
 # define FUZZ_R_STACK_SIZE ((size_t)1 << 30)
 #endif
 
+/*
+ * R_CheckStack()'s limit, far below the stack it guards.  When an R error
+ * longjmps out of more than 64 MiB of stack, ASAN does not unpoison the
+ * frames it abandons -- a fixed cap in __asan_handle_no_return, which
+ * says "ASan is ignoring requested __asan_handle_no_return" -- and the
+ * next code to reuse that stack trips over their stale redzones: a
+ * stack-buffer-overflow in whatever runs after the error, with no bug
+ * behind it.  R's check is what ends recursion that goes through C
+ * (UseMethod dispatch, the AST interpreter, deparse through the poll of
+ * instrumentation/0005), and R handles the overflow error with another
+ * 5% of stack, so a limit of 48 MiB keeps those errors inside ASAN's
+ * cleanup.  The walkers that never check still have the whole stack.
+ */
+#ifndef FUZZ_R_CSTACK_LIMIT
+# define FUZZ_R_CSTACK_LIMIT ((uintptr_t)48 << 20)
+#endif
+
 typedef struct {
     void (*fn)(void *);
     void *arg;
@@ -625,9 +642,8 @@ static void fuzz_init_r(void)
      * terabytes of usage and R would abort ("unable to initialize the
      * JIT").  macOS never sets it when embedded, which hides this
      * locally.  Switch the check off for startup, then measure against
-     * this thread with R's own 5% of headroom for handling the overflow
-     * error: R_CheckStack() fires as an ordinary R error at
-     * 0.95 * FUZZ_R_STACK_SIZE rather than the sanitizer catching a fault.
+     * this thread: R_CheckStack() fires as an ordinary R error at
+     * FUZZ_R_CSTACK_LIMIT (see there for why it is not the whole stack).
      * setup_Rmainloop itself would turn any limit above 100 MB into
      * "unlimited", hence setting it after. */
     char *r_argv[] = {"R", "--vanilla", "--no-echo", "--no-restore"};
@@ -637,7 +653,7 @@ static void fuzz_init_r(void)
     R_CStackLimit = (uintptr_t)-1;
     R_Interactive = TRUE;   /* as Rf_initEmbeddedR */
     setup_Rmainloop();
-    R_CStackLimit = (uintptr_t)(0.95 * FUZZ_R_STACK_SIZE);
+    R_CStackLimit = FUZZ_R_CSTACK_LIMIT;
 
     fuzz_suppress_warnings();
 }

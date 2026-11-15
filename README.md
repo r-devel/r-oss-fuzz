@@ -105,7 +105,11 @@ stack overflow" and recovers, long-standing behaviour rather than a defect
 to report, but under ASAN it is a crash every target walking a nested
 value would keep finding. `common.h` defines the libFuzzer entry points
 and forwards them to the harness's `fuzz_target_init` / `fuzz_target_run`
-on that thread, with R's C stack check re-pointed at it. The thread does
+on that thread, with R's C stack check re-pointed at it. That check stops
+at 48 MiB, not at the end of the stack: ASAN does not unpoison the frames
+an R error abandons beyond 64 MiB, and their stale redzones would turn the
+next stack access after the error into a false stack-buffer-overflow. The
+walkers that never check still have the whole stack. The thread does
 not survive a fork, and AFL++'s driver forks its forkserver after
 `LLVMFuzzerInitialize`, so an atfork handler forgets it in the child and
 the next input starts a fresh one. The one walker
