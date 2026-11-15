@@ -222,6 +222,14 @@ static void run_checks(void *unused)
         check("x <- !1:999999; repeat !x", 1, 0);
         check("f <- function() f(); f()", 1, 0);
         check("f <- function(n) if (n > 0) f(n - 1) else 0; f(100000)", 1, 0);
+        /* Recursion through C, which byte-code's closure calls are not:
+         * under ASAN each UseMethod level recurses in C deeply enough that
+         * the expressions limit comes past the 64 MiB that ASAN unpoisons
+         * after an error, and the harness's own reset then failed on the
+         * stale redzones (oss-fuzz 5678622682447872).  R's C stack check
+         * (FUZZ_R_CSTACK_LIMIT) now ends it first. */
+        check("g <- function(x) UseMethod('g'); "
+              "g.default <- function(x) UseMethod('g'); g(1)", 1, 0);
         check("40 + 2", 0, 42);
         R_gc();
     }
@@ -245,7 +253,7 @@ static void run_checks(void *unused)
     check("x <- list(); for (i in 1:2000) x <- list(x); length(as.character(x))", 0, 1);
     /* And R's own check still fires, as an R error, for recursion it sees. */
     check("f <- function(n) if (n > 0) f(n - 1) else 0; f(100000)", 1, 0);
-    assert(R_CStackLimit == (uintptr_t)(0.95 * FUZZ_R_STACK_SIZE));
+    assert(R_CStackLimit == FUZZ_R_CSTACK_LIMIT);
 
     /* The budget bounds work, not time: a loop that fits runs to the end,
      * and the same input gives the same answer every time. */
