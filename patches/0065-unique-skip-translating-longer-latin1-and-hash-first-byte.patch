@@ -27,10 +27,10 @@ for each of their lookups.  R 4.6.1 takes 0.25 s in unique(l) and
 allocation pushed the slot past 25 s.  With this patch both take
 about 1 ms.
 
-Upstream status: r-devel/r-svn PR #499, filed 2026-11-16; no R
-Bugzilla report yet.  The upstream PR also adds a regression test to
-tests/reg-fuzz.R, left out here so this carry patch does not go stale
-with that file.
+Upstream status: R Bugzilla 19329 (filed as an enhancement, P4) and
+r-devel/r-svn PR #499, both filed 2026-11-16.  The upstream PR also
+adds a regression test to tests/reg-fuzz.R, left out here so this
+carry patch does not go stale with that file.
 Delete this patch once the fix lands in R trunk.
 
 diff --git a/src/main/unique.c b/src/main/unique.c
