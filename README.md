@@ -54,7 +54,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
 | `eval`         | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic, attributes and S3 dispatch to the input's own methods (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`, `attrib.c`, `objects.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
-| `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
+| `grep`         | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
@@ -70,10 +70,9 @@ docker/base/      base image holding a prebuilt, instrumented R
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
 manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see
 below. OSS-Fuzz findings land in a public
-tracker with a 90-day disclosure clock, and the regex targets mostly surface
-bugs in the bundled TRE engine — whose upstream is dormant, so every fix must
-be hand-patched into R. That triage load is worth opting into deliberately
-once the initial targets have settled, rather than at onboarding.
+tracker with a 90-day disclosure clock, so each target is promoted
+deliberately. Regex targets would mostly surface bugs in the bundled TRE
+engine — whose upstream is dormant, so every fix must be hand-patched into R.
 
 For the same reason no harness drives TRE at all: every regex call in the
 harnesses passes `perl = TRUE` (or `fixed = TRUE` where there is no `perl`
@@ -82,11 +81,11 @@ known problems — bounded-repeat expansion at compile time, exponential
 backtracking once a back-reference is present, and internal assertions that
 `longjmp` out of `tre_compile()` and leak everything it had allocated — are
 not findings this project pursues. `agrep` is TRE-only, which is why it stays
-deferred.
-`rd` is held back for a different reason: its first runs hit two R bugs that
-have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
-through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
-`\Sexpr`.
+deferred; `grep` never reaches TRE and runs on OSS-Fuzz.
+`rd` is held back for a different reason: `parse_Rd()` never returns on an
+unterminated `\Sexpr` (still so in trunk r90938). The other bug its first
+runs hit, the `iconv()` leak of R Bugzilla 19134 (reached through
+`\encoding{}`), is fixed by `patches/0031`.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
