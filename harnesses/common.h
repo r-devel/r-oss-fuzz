@@ -115,7 +115,7 @@ static void fuzz_set_r_home(void)
  *     fuzz_repeat_product_excessive for that guard.
  *   - It does cost coverage of code paths that need larger results.
  *     A target can change the default by defining FUZZ_R_MAX_VSIZE
- *     before including this header (eval and unserialize lower it).
+ *     before including this header (eval, load and unserialize lower it).
  *     Raising it past ClusterFuzz's -rss_limit_mb=2560 is pointless:
  *     libFuzzer kills the process as out-of-memory before R's limit
  *     can turn the allocation into an error (decompress, Nov 2026).
