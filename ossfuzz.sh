@@ -376,20 +376,19 @@ mkdir -p "$SEED_STAGE/unserialize"
 #
 # To add a target: drop a harnesses/<name>.c (plus any of the above).
 #
-# DEFERRED_TARGETS holds names back from the OSS-Fuzz build.  The initial
-# OSS-Fuzz scope is deliberately narrow: every finding lands in the public
-# tracker with a 90-day disclosure clock, and the regex targets mostly
-# surface bugs in the bundled TRE engine, whose dormant upstream means
-# each fix must be hand-patched into R.  That triage load should be opted
-# into deliberately, once the initial targets have settled -- promoting a
-# target is just deleting its name here.  rd waits on two R bugs its first
-# runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
-# (reached through \encoding{}) and parse_Rd() never returning on an
-# unterminated \Sexpr.
+# DEFERRED_TARGETS holds names back from the OSS-Fuzz build: every
+# finding lands in the public tracker with a 90-day disclosure clock, so
+# each target is promoted deliberately -- promoting one is just deleting
+# its name here.  agrep drives the bundled TRE engine, whose dormant
+# upstream means each fix must be hand-patched into R (grep, promoted,
+# passes perl = TRUE everywhere).  rd waits on parse_Rd() never returning
+# on an unterminated \Sexpr, still the case in trunk r90938; the other bug
+# its first runs hit, the iconv() leak of Bugzilla 19134 (through
+# \encoding{}), is fixed by patches/0031.
 # ClusterFuzzLite is not so constrained (findings stay within this
 # repository's CI), so .clusterfuzzlite/build.sh clears the list and keeps
 # fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep rd}"
 
 # How each harness links R.  Normally that is the bundled libR.so.  The
 # introspector build (see step 1) links the whole static libR.a instead,
