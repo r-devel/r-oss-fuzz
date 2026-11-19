@@ -24,6 +24,7 @@ dictionaries/     <name>.dict   (libFuzzer dictionaries)
 options/          <name>.options (libFuzzer per-target options)
 seeds/<name>/     static seed corpus files for that target
 patches/          fixes for R defects not yet in trunk, applied to the R source
+features/         unmerged upstream proposals carried for speed (C byte-code compiler)
 instrumentation/  fuzzing-only changes to R (poll intervals, poisoning, aborts)
 ossfuzz.sh        the build script OSS-Fuzz runs
 docs/             notes for a target that needs more than its header comment
@@ -35,9 +36,13 @@ tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c),
                   scripts/check-wrappers.sh runs every target's seeds with
                   R's errors shown and fails on a call to a function R
                   cannot find (a slot that can never succeed);
+                  scripts/build-local-macos.sh links one harness against a
+                  local static ASAN R (see "Building natively on macOS");
                   scripts/ossfuzz-status.py summarizes the targets' recent
                   OSS-Fuzz sessions and the open testcases (needs an
-                  oss-fuzz.com session cookie, see its header)
+                  oss-fuzz.com session cookie, see its header);
+                  scripts/sync-compiler.sh regenerates features/0001
+                  from its upstream pull request
 .clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
 docker/base/      base image holding a prebuilt, instrumented R
 ```
@@ -58,9 +63,10 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `eval`         | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic, attributes and S3 dispatch to the input's own methods (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`, `attrib.c`, `objects.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
 | `formula`      | `terms` / `update.formula` / `model.frame` / `model.matrix` and `D` / `deriv` — formula expansion, contrasts and symbolic differentiation (stats `model.c`, `deriv.c`) |
-| `grep` \*      | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
+| `grep`         | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
+| `nmath`        | the `d`/`p`/`q` functions of every distribution and the special functions (gamma, beta, `psigamma`, `choose`, Bessel) on raw doubles — convergence and work-array sizing in `src/nmath` |
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `readtable`    | `read.table` / `read.csv` / `count.fields` / `write.table` — the header pre-reader, field counter and quoting writer in utils `io.c` that `scan` never reaches |
@@ -74,10 +80,9 @@ docker/base/      base image holding a prebuilt, instrumented R
 Targets marked \* are held back from OSS-Fuzz, and are only fuzzed by a
 manual run of the (otherwise disabled) ClusterFuzzLite batch workflow, see
 below. OSS-Fuzz findings land in a public
-tracker with a 90-day disclosure clock, and the regex targets mostly surface
-bugs in the bundled TRE engine — whose upstream is dormant, so every fix must
-be hand-patched into R. That triage load is worth opting into deliberately
-once the initial targets have settled, rather than at onboarding.
+tracker with a 90-day disclosure clock, so each target is promoted
+deliberately. Regex targets would mostly surface bugs in the bundled TRE
+engine — whose upstream is dormant, so every fix must be hand-patched into R.
 
 For the same reason no harness drives TRE at all: every regex call in the
 harnesses passes `perl = TRUE` (or `fixed = TRUE` where there is no `perl`
@@ -86,11 +91,11 @@ known problems — bounded-repeat expansion at compile time, exponential
 backtracking once a back-reference is present, and internal assertions that
 `longjmp` out of `tre_compile()` and leak everything it had allocated — are
 not findings this project pursues. `agrep` is TRE-only, which is why it stays
-deferred.
-`rd` is held back for a different reason: its first runs hit two R bugs that
-have no carried fix yet, the `iconv()` leak of R Bugzilla 19134 (reached
-through `\encoding{}`) and `parse_Rd()` never returning on an unterminated
-`\Sexpr`.
+deferred; `grep` never reaches TRE and runs on OSS-Fuzz.
+`rd` is held back for a different reason: `parse_Rd()` never returns on an
+unterminated `\Sexpr` (still so in trunk r90938). The other bug its first
+runs hit, the `iconv()` leak of R Bugzilla 19134 (reached through
+`\encoding{}`), is fixed by `patches/0031`.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
@@ -182,8 +187,9 @@ by `ossfuzz.sh` using the R it just built, and staged into the same
 
 ## Carried changes to R
 
-Two directories of patches are applied to the R source before it is built,
-by the same loop in `ossfuzz.sh`, in filename order, `patches/` first.
+Three directories of patches are applied to the R source before it is
+built, by the same loop in `ossfuzz.sh`, in filename order: `patches/`,
+then `features/`, then `instrumentation/`.
 
 **`patches/`** carries fixes for defects in R that have not landed in trunk
 yet. They exist because fuzzing an R with a known crash is worse than it
@@ -194,9 +200,24 @@ has become redundant for exactly that reason. Note that merging a fix here
 also marks the corresponding OSS-Fuzz finding as verified and starts its
 public disclosure clock.
 
+**`features/`** carries upstream proposals that have not landed, because
+they make fuzzing faster. Each is generated from its pull request by a
+script, never edited by hand, and deleted once it lands. Currently one:
+
+| Patch | Does | Upstream | Sync with |
+|-------|------|----------|-----------|
+| `0001-compiler-native-byte-code-compiler` | R's byte-code compiler in C (`src/main/bccompile.c`), used by `compiler::compile()`, `cmpfun()` and the JIT in place of `cmp.R`, with identical output. The `eval` target compiles every input, and `cmp.R` is R code: in a strict-barrier build without sanitizers, compilation is 97-100% of the time each seed input takes, and the C compiler does it 53x faster. | [r-devel/r-svn#463](https://github.com/r-devel/r-svn/pull/463), R Bugzilla 19297 | `scripts/sync-compiler.sh` |
+
+Run the sync script after the pull request changes (`--check` only reports
+whether the patch is behind it), then the patch checks below. If the patch
+stops applying, `compiler::compile()` falls back to `cmp.R`, so the targets
+keep working, only slower. A crash whose stack is inside carried feature
+code is a bug in that proposal, not in R: fix it in the pull request and
+re-sync, rather than reporting it to R.
+
 **`instrumentation/`** carries changes that make R easier to fuzz but fix
 nothing. They are permanent, never meant for upstream, and may assume the
-fixes above are in place. Each header says what it is for. Currently:
+changes above are in place. Each header says what it is for. Currently:
 
 | Patch | Does |
 |-------|------|
@@ -206,6 +227,7 @@ fixes above are in place. Each header says what it is for. Currently:
 | `0004-sys-std-abort-on-fatal-error` | `R_Suicide()` aborts instead of exiting with status 2, so a fatal error gets a stack trace and deduplicates on it; the harnesses also set `_R_GC_FAIL_ON_ERROR_` so GC consistency failures take this path |
 | `0005-deparse-poll-for-interrupts` | `deparse` polls for interrupts every 1024 appends to its line buffer (freeing the buffer if the poll unwinds), so the `eval` target's budget can stop `as.character()` of a list nested tens of thousands deep, whose deparse is quadratic in the depth and otherwise runs for minutes; R itself never polls there |
 | `0006-sock-listen-on-loopback-only` | R's server sockets bind to 127.0.0.1 instead of every interface, so the listening port the `sockets` target holds while an input runs cannot be reached, or fed input, from another host |
+| `0007-bccompile-accept-base-named-frame-as-base` | the C compiler of `features/0001` treats a frame named like base's package frame as base, as `cmp.R` does once the `eval` harness has rebound `isBaseVar`, so loops with a conditional `break` compile to jumps and calls on literals are folded under either compiler; goes when `features/0001` does |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.
@@ -262,6 +284,54 @@ The project `Dockerfile` clones this repository, so pushed changes here are
 what get built. To iterate on uncommitted local changes, mount this repo
 into the builder in place of the clone.
 
+### Building natively on macOS
+
+That build takes about an hour. For a loop of seconds, build R once as a
+static library with ASAN and libFuzzer's coverage instrumentation, then link
+one harness at a time against it with `scripts/build-local-macos.sh`. It
+needs Homebrew's LLVM (Apple's clang ships no libFuzzer runtime), gfortran,
+and the libraries on the script's link line (pcre2, libdeflate, zstd, xz,
+gettext).
+
+```sh
+# R trunk in src/r-source: an svn export, or a git mirror's `git archive`
+# plus an SVNINFO file, which the build needs outside an svn checkout.
+# Then apply patches/ and instrumentation/ as the OSS-Fuzz build does:
+SRC=$PWD/src WORK=$PWD/work R_PATCH_ONLY=1 bash <this repo>/ossfuzz.sh
+
+mkdir build && cd build
+../src/r-source/configure --enable-R-static-lib --enable-strict-barrier \
+    --without-x --without-recommended-packages --disable-openmp \
+    --with-internal-tzcode --disable-java \
+    CC='/opt/homebrew/opt/llvm/bin/clang -fsanitize=address,fuzzer-no-link' \
+    CXX='/opt/homebrew/opt/llvm/bin/clang++ -fsanitize=address,fuzzer-no-link' \
+    CFLAGS='-g -O1 -fno-omit-frame-pointer' \
+    CXXFLAGS='-g -O1 -fno-omit-frame-pointer' \
+    CPPFLAGS=-I/opt/homebrew/include LDFLAGS=-L/opt/homebrew/lib \
+    FC=/opt/homebrew/bin/gfortran
+make -j10
+```
+
+Then, from this repository:
+
+```sh
+export RB=<that build directory>
+scripts/build-local-macos.sh parse        # writes out/parse
+cp -R seeds/parse /tmp/parse-corpus       # libFuzzer adds to its first corpus
+R_HOME=$RB DYLD_FALLBACK_LIBRARY_PATH=$RB/lib ASAN_OPTIONS=detect_leaks=0 \
+    out/parse -max_total_time=300 /tmp/parse-corpus
+```
+
+`R_HOME` is needed because `common.h` finds it through `/proc/self/exe`,
+which macOS lacks; the library path because package libraries such as
+`stats.so` name `libRlapack.dylib` without a directory. Leak detection is
+off because LeakSanitizer on macOS reports system allocations the Linux
+runners never make (the Quartz default-device probe, libc's `dtoa` cache,
+`getpwuid`'s per-thread buffer), and its per-input check stops the run at
+the first one. A change under `patches/` or `instrumentation/` means
+re-applying it to the source and re-running `make`; a harness change only
+needs the script.
+
 ### Editor setup
 
 The harnesses need R's headers, which live in an environment-specific
@@ -292,7 +362,7 @@ files) so they can be revived if needed:
 | Workflow | Trigger | Does |
 |----------|---------|------|
 | [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual, and pushes to `main` touching its inputs; pull requests touching them (build only, no push) | builds the base image (an instrumented R) and pushes it to GHCR |
-| [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/` or `instrumentation/`, daily | checks that every patch still applies to R trunk, in order |
+| [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/`, `features/` or `instrumentation/`, daily | checks that every patch still applies to R trunk, in order |
 | [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | manual (disabled) | builds the harnesses and fuzzes what the change affects |
 | [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | manual (disabled) | fuzzes every target and grows the stored corpus; the only way the deferred targets get fuzzed |
 | [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | manual (disabled) | minimises the stored corpus |
@@ -310,12 +380,13 @@ the work: `R_BUILD_ONLY` (build and install R, then stop — used when baking
 the base image) and `R_PREBUILT` (skip the R build, use an existing install —
 used by [`.clusterfuzzlite/build.sh`](./.clusterfuzzlite/build.sh)).
 
-Two more exist for the checks on `patches/` and `instrumentation/` (see
-[Carried changes to R](#carried-changes-to-r)): `R_PATCH_ONLY` stops after applying the patches, and
-`R_PATCH_STRICT` turns a patch that does not apply (or has already landed)
-into a failure rather than a log line. `patches-apply.yml` uses both on every
-pull request touching either directory and once a day, since trunk moves daily and a
-patch can go stale without anyone touching this repository; the pull-request
+Two more exist for the checks on `patches/`, `features/` and
+`instrumentation/` (see [Carried changes to R](#carried-changes-to-r)):
+`R_PATCH_ONLY` stops after applying the patches, and `R_PATCH_STRICT` turns
+a patch that does not apply (or has already landed) into a failure rather
+than a log line. `patches-apply.yml` uses both on every pull request
+touching any of these directories and once a day, since trunk moves daily
+and a patch can go stale without anyone touching this repository; the pull-request
 runs of `base-image.yml` use the latter to also catch a patch that applies but
 does not compile.
 

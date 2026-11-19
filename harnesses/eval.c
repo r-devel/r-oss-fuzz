@@ -96,7 +96,36 @@ static const char *const eval_primitives[] = {
     "UseMethod",
     /* rep allocates its result, so the vector heap bounds it; the compact
      * sequence builders are wrapped below. */
-    "rep", "seq_along"
+    "rep", "seq_along",
+    /* Tier 2 (docs/eval.md): the remaining computational primitives.
+     * Every result is allocated, so the vector heap bounds each call and
+     * the budget bounds the number of calls.  The primitives base has and
+     * this list leaves out are each a capability or a way past a limit:
+     * .Internal, .Primitive, the foreign-function interfaces (.C, .Call,
+     * .External, .Fortran and their graphics forms), environments
+     * (as.environment, baseenv, emptyenv, globalenv, pos.to.env,
+     * environment<-; and ~, which captures the caller's), <<- (assigns in
+     * the global environment when the name is not found), evaluation
+     * (Exec, Tailcall, forceAndCall, standardGeneric), on.exit,
+     * class<- and oldClass<- and @<- (slots are attributes, class
+     * included; see the wrappers), process state (.isMethodsDispatchOn,
+     * .cache_class, interactive, proc.time, gc.time, tracing, browser,
+     * lazyLoadDBfetch) and the namespace operators :: and :::. */
+    "log", "exp", "expm1", "log1p", "log2", "log10",
+    "sin", "cos", "tan", "sinpi", "cospi", "tanpi",
+    "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+    "gamma", "lgamma", "digamma", "trigamma",
+    "round", "signif", "sign",
+    "Re", "Im", "Mod", "Arg", "Conj",
+    "cumsum", "cumprod", "cummax", "cummin", "range",
+    "%*%", "crossprod", "tcrossprod",
+    "anyNA", "xtfrm", "nzchar", "enc2native", "enc2utf8",
+    "as.numeric", "as.call", "call", "expression", "length<-",
+    "storage.mode<-", "is.array", "is.atomic", "is.call", "is.expression",
+    "is.function", "is.language", "is.matrix", "is.name", "is.numeric",
+    "is.object", "is.pairlist", "is.raw", "is.recursive", "is.single",
+    "is.symbol", "isS4", "@", ".class2", ".subset", ".subset2",
+    "...elt", "...length", "...names", "declare", "unCfillPOSIXlt"
 };
 
 /*
@@ -418,15 +447,15 @@ static int eval_tree_within_budget(SEXP x, unsigned depth, unsigned *nodes)
  * is not used here (R_ENABLE_JIT=0): it compiles on its own schedule,
  * keeps a cache across inputs, and catches errors inside the compiler,
  * where a budget error would be swallowed and the budget left switched
- * off.  Instead the harness compiles each top-level expression itself,
- * with the budget paused, and evaluates the result.  Closures the input
- * defines are created with compiled bodies (MAKECLOSURE), top-level loops
- * are compiled too, and anything the compiler declines runs through the
- * AST interpreter, which is what the JIT falls back to as well.  Compile
- * time is bounded by the parsed-tree limits; constant folding evaluates
- * base functions on literals only.
+ * off.  Instead the harness compiles each top-level expression itself
+ * and evaluates the result.  Closures the input defines are created with
+ * compiled bodies (MAKECLOSURE), top-level loops are compiled too, and
+ * anything the compiler declines runs through the AST interpreter, which
+ * is what the JIT falls back to as well.  Constant folding evaluates base
+ * functions on literals only.
  *
- * The compiler (compiler:::cmp.R) needs two things from the sandbox.  It
+ * The compiler (compiler:::cmp.R, or bccompile.c where features/0001 is
+ * applied; both emit the same code) needs two things from the sandbox.  It
  * refuses an environment whose chain does not end in a frame topenv()
  * recognises, and it inlines base syntax and arithmetic only for names it
  * finds bound in a frame it classifies as base, by the frame's "name"
@@ -437,7 +466,8 @@ static int eval_tree_within_budget(SEXP x, unsigned depth, unsigned *nodes)
  * whether break/next compile to a jump or to a loop context, compares
  * frames by identity instead, so it is rebound to accept the named frame;
  * without that every loop with a conditional break would compile with a
- * context, which a session's would not.
+ * context, which a session's would not.  The rebinding cannot reach
+ * bccompile.c's twin of isBaseVar; instrumentation/0007 changes that one.
  */
 static const char eval_compiler_setup[] = R"(
 local({
@@ -478,15 +508,17 @@ y <- seq_len(3); names(y) <- c("a", "b", "c"); dim(y) <- 3L; y[[2L]]
 
 /* Byte-code for expr, or expr itself if the compiler declined it.
  *
- * The compiler is R code and runs under the input's budget like the code
- * it produces.  It used to run with the budget paused, bounded only by
+ * cmp.R is R code and runs under the input's budget like the code it
+ * produces.  It used to run with the budget paused, bounded only by
  * the parsed-tree limits, but its cost is not linear in the tree: constant
  * folding re-walks every subtree at each level of nesting, so an
  * expression nested 62 calls deep compiles in about a second under ASAN
  * and four of them (270 bytes, within the tree limits) in over four,
  * which on the bots was the 25 s libFuzzer timeout.  A compile the
  * budget cuts off leaves eval_budget at zero; the caller stops the input
- * there rather than running the expression uncompiled.
+ * there rather than running the expression uncompiled.  bccompile.c
+ * (features/0001) never polls, so only the parsed-tree limits bound it,
+ * which keeps those four expressions to about 15 ms without sanitizers.
  */
 static SEXP eval_compile(SEXP expr, SEXP env)
 {

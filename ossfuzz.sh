@@ -37,9 +37,9 @@ LIBZSTD_VERSION="${LIBZSTD_VERSION:-1.5.7}"
 # Two more serve the CI checks on patches/ (.github/workflows/patches-apply.yml
 # and the pull-request runs of base-image.yml):
 #
-#   R_PATCH_STRICT=1   a patch (patches/ or instrumentation/) that does not
-#                      apply, or is already applied, fails the build instead
-#                      of being reported and skipped
+#   R_PATCH_STRICT=1   a patch (patches/, features/ or instrumentation/) that
+#                      does not apply, or is already applied, fails the build
+#                      instead of being reported and skipped
 #   R_PATCH_ONLY=1     apply the patches, then stop before configuring R
 #
 # All four are unset in the OSS-Fuzz build, which builds R from source as usual.
@@ -59,19 +59,24 @@ else
     cd "$R_SOURCE"
 
     ####################################################################
-    # Local patches and instrumentation
+    # Local patches, features and instrumentation
     ####################################################################
-    # Two directories of patches are applied to the R source, in filename
-    # order within each (hence the numeric prefixes -- one patch may
-    # depend on an earlier one), patches/ first:
+    # Three directories of patches are applied to the R source, in
+    # filename order within each (hence the numeric prefixes -- one patch
+    # may depend on an earlier one), in this order:
     #
     #   patches/          fixes for defects in R that have not landed yet.
     #                     Temporary by nature: delete each one once the
     #                     fix is in trunk.
+    #   features/         upstream proposals that have not landed, carried
+    #                     because they make fuzzing faster.  Each is
+    #                     generated from its pull request by a script
+    #                     (scripts/sync-compiler.sh); delete it once it
+    #                     lands.
     #   instrumentation/  changes that make R easier to fuzz but fix
     #                     nothing -- poll intervals, limits, hooks.
     #                     Permanent, never for upstream, and may assume
-    #                     the fixes above are in place.
+    #                     the changes above are in place.
     #
     # The fixes are not cosmetic.  Fuzzing an R with a known crash is
     # worse than it sounds: libFuzzer replays the entire stored corpus at
@@ -85,9 +90,9 @@ else
     # take down every target.  Two failure modes are worth telling apart
     # in the log:
     #
-    #   "already applied"  the fix landed upstream -- delete the patch
-    #                      (for instrumentation/ this cannot legitimately
-    #                      happen, and is reported as such)
+    #   "already applied"  the fix or feature landed upstream -- delete the
+    #                      patch (for instrumentation/ this cannot
+    #                      legitimately happen, and is reported as such)
     #   "does not apply"   context drifted -- the bug is probably still
     #                      live, so the patch needs rebasing
     apply_patch_dir() {
@@ -103,11 +108,17 @@ else
                 echo "ossfuzz.sh: $kind $name: applied"
                 n_applied=$((n_applied + 1))
             elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
-                if [ "$kind" = patch ]; then
-                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
-                else
-                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- did trunk adopt it? check" >&2
-                fi
+                case "$kind" in
+                    patch)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+                        ;;
+                    feature)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- landed upstream? delete it" >&2
+                        ;;
+                    *)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- did trunk adopt it? check" >&2
+                        ;;
+                esac
                 n_already=$((n_already + 1))
             else
                 echo "ossfuzz.sh: $kind $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
@@ -120,16 +131,17 @@ else
         # that no longer applies, or has landed upstream, must fail there
         # so it gets rebased or deleted before it reaches a real build.
         if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
-            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) $kind(es) above" >&2
+            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) $(basename "$dir")/ patch(es) above" >&2
             exit 1
         fi
     }
 
     apply_patch_dir "$REPO/patches" patch
+    apply_patch_dir "$REPO/features" feature
     apply_patch_dir "$REPO/instrumentation" instrumentation
 
     if [ -n "${R_PATCH_ONLY:-}" ]; then
-        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches and instrumentation applied, stopping before the R build"
+        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches, features and instrumentation applied, stopping before the R build"
         exit 0
     fi
 
@@ -364,20 +376,19 @@ mkdir -p "$SEED_STAGE/unserialize"
 #
 # To add a target: drop a harnesses/<name>.c (plus any of the above).
 #
-# DEFERRED_TARGETS holds names back from the OSS-Fuzz build.  The initial
-# OSS-Fuzz scope is deliberately narrow: every finding lands in the public
-# tracker with a 90-day disclosure clock, and the regex targets mostly
-# surface bugs in the bundled TRE engine, whose dormant upstream means
-# each fix must be hand-patched into R.  That triage load should be opted
-# into deliberately, once the initial targets have settled -- promoting a
-# target is just deleting its name here.  rd waits on two R bugs its first
-# runs hit that have no carried fix yet: the iconv() leak of Bugzilla 19134
-# (reached through \encoding{}) and parse_Rd() never returning on an
-# unterminated \Sexpr.
+# DEFERRED_TARGETS holds names back from the OSS-Fuzz build: every
+# finding lands in the public tracker with a 90-day disclosure clock, so
+# each target is promoted deliberately -- promoting one is just deleting
+# its name here.  agrep drives the bundled TRE engine, whose dormant
+# upstream means each fix must be hand-patched into R (grep, promoted,
+# passes perl = TRUE everywhere).  rd waits on parse_Rd() never returning
+# on an unterminated \Sexpr, still the case in trunk r90938; the other bug
+# its first runs hit, the iconv() leak of Bugzilla 19134 (through
+# \encoding{}), is fixed by patches/0031.
 # ClusterFuzzLite is not so constrained (findings stay within this
 # repository's CI), so .clusterfuzzlite/build.sh clears the list and keeps
 # fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep grep rd}"
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep rd}"
 
 # How each harness links R.  Normally that is the bundled libR.so.  The
 # introspector build (see step 1) links the whole static libR.a instead,
@@ -390,6 +401,22 @@ if [ "${SANITIZER:-}" = introspector ]; then
     rm -f "$OUT/r-install/lib/R/lib/libR.a"
 else
     R_LINK_FLAGS="-L$R_LIB_DIR -lR"
+
+    # R dlopen()s the base packages' shared libraries itself, and the
+    # OSS-Fuzz coverage report renders only the libraries ldd lists for
+    # a fuzzer, so the C code of stats, utils, grDevices, graphics, tools
+    # and methods was missing from it -- everything the readtable, colors
+    # and coerce targets reach beyond libR.  Linking them as ordinary
+    # dependencies puts them on that list.  They have no SONAME, so -l:
+    # records the bare file name, found at run time through one rpath per
+    # package; R's own dlopen() of the same file then gets the copy
+    # already loaded.  --no-as-needed keeps them although the harnesses
+    # reference none of their symbols.
+    R_LINK_FLAGS="$R_LINK_FLAGS -Wl,--no-as-needed"
+    for pkg in stats utils grDevices graphics tools methods; do
+        R_LINK_FLAGS="$R_LINK_FLAGS -L$R_HOME/library/$pkg/libs -l:$pkg.so"
+        R_LINK_FLAGS="$R_LINK_FLAGS -Wl,-rpath,\$ORIGIN/r-install/lib/R/library/$pkg/libs"
+    done
 fi
 
 for src in "$REPO"/harnesses/*.c; do
