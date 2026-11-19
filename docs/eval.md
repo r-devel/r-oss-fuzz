@@ -303,13 +303,22 @@ before:
    `R_run_onexits` that lets the harness drop pending handlers once an
    input is over its budget. Both are decisions still to make, not
    oversights.
-2. **Every remaining computational primitive**: the full `names.c` table
-   minus the capability set (`.Internal`, `.External*`, `.Call`, `.C`,
-   `.Fortran`, `.Primitive`, `environment<-`, `as.environment`, `baseenv`,
-   `globalenv`, `emptyenv`, `pos.to.env`, `lazyLoadDBfetch`, `browser`,
-   `tracemem` and friends, `proc.time`, `gc.time`, `interactive`,
-   `standardGeneric`). `is.*`, `log`/`exp`/trig/gamma, `cumsum`, `range`,
-   complex accessors, `%*%`, `xtfrm`, `anyNA`, `as.call`, `call`.
+2. **Every remaining computational primitive** (done, 2026-11): the full
+   `names.c` table minus the capability set (`.Internal`, `.External*`,
+   `.Call`, `.C`, `.Fortran`, `.Primitive`, `environment<-`,
+   `as.environment`, `baseenv`, `globalenv`, `emptyenv`, `pos.to.env`,
+   `lazyLoadDBfetch`, `browser`, `tracemem` and friends, `proc.time`,
+   `gc.time`, `interactive`, `standardGeneric`). `is.*`, `log`/`exp`/trig/gamma,
+   `cumsum`, `range`, complex accessors, `%*%`, `crossprod`, `xtfrm`,
+   `anyNA`, `as.call`, `call`, `...elt`, `.subset2`, `length<-`,
+   `storage.mode<-`. The list in `eval.c` is explicit, so a primitive R adds
+   later stays out until someone reads it. Besides the capability set, the
+   tier leaves out primitives that would undo a limit already in place:
+   `<<-` (it assigns in the global environment when no enclosing frame has
+   the name), `~` (a formula carries its caller's environment), `Exec`,
+   `Tailcall` and `forceAndCall` (they evaluate or call what they are
+   given), `@<-` (slots are attributes, `class` among them), and the tier 1
+   exclusions `class<-`, `oldClass<-` and `on.exit`.
 3. **Pure base closures over `.Internal`**, imported one at a time behind
    a wrapper whose enclosure is a private environment (the `:` pattern), so
    the namespace is never reachable: `besselI`, `intToUtf8`, `utf8ToInt`,
