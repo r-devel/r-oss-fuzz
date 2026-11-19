@@ -11,7 +11,7 @@
 #   $CC, $CXX, $CFLAGS, $CXXFLAGS   compiler + sanitizer flags
 #   $LIB_FUZZING_ENGINE             the fuzzing engine to link against
 #   $FUZZING_ENGINE                 its name (libfuzzer, afl, ...)
-#   $SRC, $WORK, $OUT              source / scratch / output directories
+#   $SRC, $WORK, $OUT               source / scratch / output directories
 #
 # The R source tree is expected at $SRC/r-source (checked out by the
 # OSS-Fuzz Dockerfile).  Override with $R_SOURCE for local runs.
