@@ -63,6 +63,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `grep`         | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
+| `nmath`        | the `d`/`p`/`q` functions of every distribution and the special functions (gamma, beta, `psigamma`, `choose`, Bessel) on raw doubles — convergence and work-array sizing in `src/nmath` |
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
 | `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
 | `readtable`    | `read.table` / `read.csv` / `count.fields` / `write.table` — the header pre-reader, field counter and quoting writer in utils `io.c` that `scan` never reaches |
