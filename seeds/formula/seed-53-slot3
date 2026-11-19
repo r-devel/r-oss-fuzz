@@ -1,0 +1,1 @@
+atan(x / y) + tan(x) + sinpi(y) + cospi(x)

@@ -1,0 +1,1 @@
+pnorm(x) * dnorm(y) + gamma(x) + lgamma(y)
