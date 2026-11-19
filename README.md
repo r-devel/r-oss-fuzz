@@ -35,6 +35,8 @@ tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c),
                   scripts/check-wrappers.sh runs every target's seeds with
                   R's errors shown and fails on a call to a function R
                   cannot find (a slot that can never succeed);
+                  scripts/build-local-macos.sh links one harness against a
+                  local static ASAN R (see "Building natively on macOS");
                   scripts/ossfuzz-status.py summarizes the targets' recent
                   OSS-Fuzz sessions and the open testcases (needs an
                   oss-fuzz.com session cookie, see its header)
@@ -260,6 +262,54 @@ python3 infra/helper.py run_fuzzer r parse
 The project `Dockerfile` clones this repository, so pushed changes here are
 what get built. To iterate on uncommitted local changes, mount this repo
 into the builder in place of the clone.
+
+### Building natively on macOS
+
+That build takes about an hour. For a loop of seconds, build R once as a
+static library with ASAN and libFuzzer's coverage instrumentation, then link
+one harness at a time against it with `scripts/build-local-macos.sh`. It
+needs Homebrew's LLVM (Apple's clang ships no libFuzzer runtime), gfortran,
+and the libraries on the script's link line (pcre2, libdeflate, zstd, xz,
+gettext).
+
+```sh
+# R trunk in src/r-source: an svn export, or a git mirror's `git archive`
+# plus an SVNINFO file, which the build needs outside an svn checkout.
+# Then apply patches/ and instrumentation/ as the OSS-Fuzz build does:
+SRC=$PWD/src WORK=$PWD/work R_PATCH_ONLY=1 bash <this repo>/ossfuzz.sh
+
+mkdir build && cd build
+../src/r-source/configure --enable-R-static-lib --enable-strict-barrier \
+    --without-x --without-recommended-packages --disable-openmp \
+    --with-internal-tzcode --disable-java \
+    CC='/opt/homebrew/opt/llvm/bin/clang -fsanitize=address,fuzzer-no-link' \
+    CXX='/opt/homebrew/opt/llvm/bin/clang++ -fsanitize=address,fuzzer-no-link' \
+    CFLAGS='-g -O1 -fno-omit-frame-pointer' \
+    CXXFLAGS='-g -O1 -fno-omit-frame-pointer' \
+    CPPFLAGS=-I/opt/homebrew/include LDFLAGS=-L/opt/homebrew/lib \
+    FC=/opt/homebrew/bin/gfortran
+make -j10
+```
+
+Then, from this repository:
+
+```sh
+export RB=<that build directory>
+scripts/build-local-macos.sh parse        # writes out/parse
+cp -R seeds/parse /tmp/parse-corpus       # libFuzzer adds to its first corpus
+R_HOME=$RB DYLD_FALLBACK_LIBRARY_PATH=$RB/lib ASAN_OPTIONS=detect_leaks=0 \
+    out/parse -max_total_time=300 /tmp/parse-corpus
+```
+
+`R_HOME` is needed because `common.h` finds it through `/proc/self/exe`,
+which macOS lacks; the library path because package libraries such as
+`stats.so` name `libRlapack.dylib` without a directory. Leak detection is
+off because LeakSanitizer on macOS reports system allocations the Linux
+runners never make (the Quartz default-device probe, libc's `dtoa` cache,
+`getpwuid`'s per-thread buffer), and its per-input check stops the run at
+the first one. A change under `patches/` or `instrumentation/` means
+re-applying it to the source and re-running `make`; a harness change only
+needs the script.
 
 ### Editor setup
 
