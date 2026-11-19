@@ -19,6 +19,16 @@
 #include <stdint.h>
 #include <string.h>
 
+/* RDX2/RDX3 files reach the same reader as the unserialize target, and
+ * it allocates each vector at its declared length before reading an
+ * element, so a few bytes of input can declare a list of millions.
+ * Nested copies stay live while each inner one is allocated, and every
+ * allocation collects all of them, so the cost grows faster than the
+ * cap: one 17KB input (oss-fuzz 5422240515293184) took 1.7s per
+ * execution at the shared 1Gb default and 0.8s at 512Mb.  Use
+ * unserialize.c's cap; its comment covers the coverage trade. */
+#define FUZZ_R_MAX_VSIZE "512Mb"
+
 #include "common.h"
 
 #define FUZZ_MAX_INPUT (1024 * 64)
