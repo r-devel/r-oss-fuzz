@@ -936,8 +936,59 @@ static void fuzz_do_target_run(void *data)
     atomic_store(&fuzz_label_current, -1);
 }
 
+#ifdef FUZZ_ENGINE_LIBFUZZER
+/*
+ * Split the libFuzzer sessions on entropic exec-time scaling (README.md,
+ * "Engine options").  Not `random(0, 1)` in the .options files: ClusterFuzz
+ * expands it, but OSS-Fuzz's build check pastes option values into
+ * `bash -c` unquoted, the parentheses are a syntax error, and every target
+ * counts as broken.  libFuzzer parses its flags only after
+ * LLVMFuzzerInitialize returns, so the flag is appended to argv here.  One
+ * already on the command line wins; that also keeps a fork-mode parent's
+ * choice in its children, which inherit its flags.
+ */
+#define FUZZ_EXEC_TIME_FLAG "-entropic_scale_per_exec_time="
+
+/* Static so LeakSanitizer counts the array as reachable. */
+static char **fuzz_split_argv;
+
+static void fuzz_split_exec_time_scaling(int *argc, char ***argv)
+{
+    for (int i = 1; i < *argc; i++) {
+        if (strncmp((*argv)[i], FUZZ_EXEC_TIME_FLAG,
+                    strlen(FUZZ_EXEC_TIME_FLAG)) == 0)
+            return;
+    }
+
+    /* Not rand(): unseeded, it gives every session the same answer. */
+    unsigned char coin;
+    FILE *urandom = fopen("/dev/urandom", "rb");
+    if (urandom == NULL || fread(&coin, 1, 1, urandom) != 1)
+        coin = (unsigned char)getpid();
+    if (urandom != NULL)
+        fclose(urandom);
+
+    fuzz_split_argv = malloc((*argc + 2) * sizeof(char *));
+    if (fuzz_split_argv == NULL)
+        return;
+    memcpy(fuzz_split_argv, *argv, *argc * sizeof(char *));
+    fuzz_split_argv[*argc] = (coin & 1) ? FUZZ_EXEC_TIME_FLAG "1"
+                                        : FUZZ_EXEC_TIME_FLAG "0";
+    fuzz_split_argv[*argc + 1] = NULL;
+
+    fprintf(stderr, "fuzz: this session runs with %s\n",
+            fuzz_split_argv[*argc]);
+    *argv = fuzz_split_argv;
+    (*argc)++;
+}
+#endif
+
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
+#ifdef FUZZ_ENGINE_LIBFUZZER
+    fuzz_split_exec_time_scaling(argc, argv);
+#endif
+
     /* libFuzzer parses this itself; the alarm wrapper needs the value. */
     for (int i = 1; i < *argc; i++) {
         const char *arg = (*argv)[i];
