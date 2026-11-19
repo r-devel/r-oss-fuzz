@@ -1,0 +1,37 @@
+Treat a frame named like base's package frame as base in bccompile.c.
+
+The eval harness binds its allowlisted primitives in a frame of its own
+that carries the name of base's package frame, so the byte-code compiler
+inlines them as it would base's.  cmp.R's isBaseVar() decides two more
+things -- whether a break or next inside a conditional compiles to a
+jump or to a loop context, and whether calls on literals are
+constant-folded -- and compares frames with base by identity, so the
+harness rebinds it in the compiler namespace to accept the named frame
+(harnesses/eval.c, eval_compiler_setup).
+
+bccompile.c, carried by features/0001, makes the same identity test in
+C, out of reach of that rebinding.  Without this, every such loop
+compiles with STARTLOOPCNTXT and 1 + 2 is left as an ADD, where cmp.R
+under the harness emits a jump and the constant 3; tests/eval.c checks
+the loop case.  This makes the C test match the rebound one.
+
+Instrumentation, not a fix, and not for upstream.  It depends on
+features/0001 and goes when that does; if features/0001 lands upstream,
+this stays for as long as the harness rebinds isBaseVar.
+
+diff --git a/src/main/bccompile.c b/src/main/bccompile.c
+--- a/src/main/bccompile.c
++++ b/src/main/bccompile.c
+@@ -1892,7 +1892,11 @@
+ static int is_base_var(SEXP sym, Cntxt *cntxt)
+ {
+     InlineInfo ii = get_inline_info(sym, cntxt, FALSE);
+-    return ii.found && (ii.frame == R_BaseNamespace || ii.frame == R_BaseEnv);
++    /* Fuzzing instrumentation: the eval harness rebinds cmp.R's isBaseVar
++       to accept its allowlist frame, named like base's package frame
++       (harnesses/eval.c, eval_compiler_setup); this is the same test. */
++    return ii.found && (ii.frame == R_BaseNamespace || ii.frame == R_BaseEnv ||
++			strcmp(pack_frame_name(ii.frame), "base") == 0);
+ }
+ 
+ 

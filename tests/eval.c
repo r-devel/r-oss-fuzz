@@ -148,6 +148,16 @@ static void check(const char *source, int expect_error, double expected)
     check_builtins_name();
 }
 
+/* Whether compiler::compile() is bccompile.c (features/0001) rather than
+ * cmp.R; stock R has no nativeCompiler internal. */
+static int native_compiler(void)
+{
+    SEXP result = R_ParseEvalString(
+        "tryCatch(.Internal(nativeCompiler(NA)), error = function(e) FALSE)",
+        R_BaseEnv);
+    return Rf_asLogical(result) == TRUE;
+}
+
 
 static void run_checks(void *unused)
 {
@@ -260,17 +270,23 @@ static void run_checks(void *unused)
     for (int i = 0; i < 3; i++)
         check("x <- 0; for (i in 1:20000) x <- x + 1; x", 0, 20000);
 
-    /* The compiler runs under the budget too.  Its constant folding is
+    /* cmp.R runs under the budget too.  Its constant folding is
      * quadratic in nesting depth: a chain of 62 unary pluses costs about
      * 20000 interrupt checks to compile (one second under ASAN), so four
      * of them, within the tree limits, used to run for several seconds
      * with the budget paused.  Now the budget ends the input inside the
-     * compiler, and a shallower chain still compiles and runs. */
+     * compiler, and a shallower chain still compiles and runs.
+     * bccompile.c compiles all four in milliseconds without polling, so
+     * with it the input runs to the end. */
     char chain[128], chains_source[640];
     snprintf(chain, sizeof(chain), "x%.*sy\n", 62, "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
     snprintf(chains_source, sizeof(chains_source), "x <- 1; y <- 2\n%s%s%s%s", chain, chain, chain, chain);
+    int native = native_compiler();
     for (int i = 0; i < 2; i++) {
-        check(chains_source, 1, 0);
+        if (native)
+            check(chains_source, 0, 3);
+        else
+            check(chains_source, 1, 0);
         check("x <- 1; y <- 2; x++++++++++++++++++++y", 0, 3);
     }
 
@@ -421,11 +437,13 @@ static void run_checks(void *unused)
     check("f <- function() { x <- !1:999999; repeat !x }; f()", 1, 0);
     check("f <- function() { x <- 1; x[2000000] <- 1 }; f()", 1, 0);
     /* A loop with a conditional break compiles to a jump, not a loop
-     * context, only while the isBaseVar rebinding in eval_compiler_setup
-     * takes; names in the base-like frame are inlined, the wrappers are
-     * called. */
+     * context, and a call on literals is folded, only while the isBaseVar
+     * rebinding in eval_compiler_setup takes (for bccompile.c, while
+     * instrumentation/0007 does); names in the base-like frame are
+     * inlined, the wrappers are called. */
     check_ops("for (i in 1:3) if (i == 2) break", "STARTFOR", 1);
     check_ops("for (i in 1:3) if (i == 2) break", "STARTLOOPCNTXT", 0);
+    check_ops("1 + 2", "ADD", 0);
     check_ops("seq_along(x)", "SEQALONG", 1);
     check_ops("switch(x, a = 1, 2)", "SWITCH", 1);
     check_ops("x + 1", "ADD", 1);

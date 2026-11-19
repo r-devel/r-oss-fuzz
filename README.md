@@ -24,6 +24,7 @@ dictionaries/     <name>.dict   (libFuzzer dictionaries)
 options/          <name>.options (libFuzzer per-target options)
 seeds/<name>/     static seed corpus files for that target
 patches/          fixes for R defects not yet in trunk, applied to the R source
+features/         unmerged upstream proposals carried for speed (C byte-code compiler)
 instrumentation/  fuzzing-only changes to R (poll intervals, poisoning, aborts)
 ossfuzz.sh        the build script OSS-Fuzz runs
 docs/             notes for a target that needs more than its header comment
@@ -34,7 +35,9 @@ tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c),
                   against a local R;
                   scripts/ossfuzz-status.py summarizes the targets' recent
                   OSS-Fuzz sessions and the open testcases (needs an
-                  oss-fuzz.com session cookie, see its header)
+                  oss-fuzz.com session cookie, see its header);
+                  scripts/sync-compiler.sh regenerates features/0001
+                  from its upstream pull request
 .clusterfuzzlite/ ClusterFuzzLite build definition (fuzzing from this repo's CI)
 docker/base/      base image holding a prebuilt, instrumented R
 ```
@@ -178,8 +181,9 @@ by `ossfuzz.sh` using the R it just built, and staged into the same
 
 ## Carried changes to R
 
-Two directories of patches are applied to the R source before it is built,
-by the same loop in `ossfuzz.sh`, in filename order, `patches/` first.
+Three directories of patches are applied to the R source before it is
+built, by the same loop in `ossfuzz.sh`, in filename order: `patches/`,
+then `features/`, then `instrumentation/`.
 
 **`patches/`** carries fixes for defects in R that have not landed in trunk
 yet. They exist because fuzzing an R with a known crash is worse than it
@@ -190,9 +194,24 @@ has become redundant for exactly that reason. Note that merging a fix here
 also marks the corresponding OSS-Fuzz finding as verified and starts its
 public disclosure clock.
 
+**`features/`** carries upstream proposals that have not landed, because
+they make fuzzing faster. Each is generated from its pull request by a
+script, never edited by hand, and deleted once it lands. Currently one:
+
+| Patch | Does | Upstream | Sync with |
+|-------|------|----------|-----------|
+| `0001-compiler-native-byte-code-compiler` | R's byte-code compiler in C (`src/main/bccompile.c`), used by `compiler::compile()`, `cmpfun()` and the JIT in place of `cmp.R`, with identical output. The `eval` target compiles every input, and `cmp.R` is R code: in a strict-barrier build without sanitizers, compilation is 97-100% of the time each seed input takes, and the C compiler does it 43x faster. | [r-devel/r-svn#463](https://github.com/r-devel/r-svn/pull/463), R Bugzilla 19297 | `scripts/sync-compiler.sh` |
+
+Run the sync script after the pull request changes (`--check` only reports
+whether the patch is behind it), then the patch checks below. If the patch
+stops applying, `compiler::compile()` falls back to `cmp.R`, so the targets
+keep working, only slower. A crash whose stack is inside carried feature
+code is a bug in that proposal, not in R: fix it in the pull request and
+re-sync, rather than reporting it to R.
+
 **`instrumentation/`** carries changes that make R easier to fuzz but fix
 nothing. They are permanent, never meant for upstream, and may assume the
-fixes above are in place. Each header says what it is for. Currently:
+changes above are in place. Each header says what it is for. Currently:
 
 | Patch | Does |
 |-------|------|
@@ -202,6 +221,7 @@ fixes above are in place. Each header says what it is for. Currently:
 | `0004-sys-std-abort-on-fatal-error` | `R_Suicide()` aborts instead of exiting with status 2, so a fatal error gets a stack trace and deduplicates on it; the harnesses also set `_R_GC_FAIL_ON_ERROR_` so GC consistency failures take this path |
 | `0005-deparse-poll-for-interrupts` | `deparse` polls for interrupts every 1024 appends to its line buffer (freeing the buffer if the poll unwinds), so the `eval` target's budget can stop `as.character()` of a list nested tens of thousands deep, whose deparse is quadratic in the depth and otherwise runs for minutes; R itself never polls there |
 | `0006-sock-listen-on-loopback-only` | R's server sockets bind to 127.0.0.1 instead of every interface, so the listening port the `sockets` target holds while an input runs cannot be reached, or fed input, from another host |
+| `0007-bccompile-accept-base-named-frame-as-base` | the C compiler of `features/0001` treats a frame named like base's package frame as base, as `cmp.R` does once the `eval` harness has rebound `isBaseVar`, so loops with a conditional `break` compile to jumps and calls on literals are folded under either compiler; goes when `features/0001` does |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.
@@ -288,7 +308,7 @@ files) so they can be revived if needed:
 | Workflow | Trigger | Does |
 |----------|---------|------|
 | [`base-image.yml`](./.github/workflows/base-image.yml)   | weekly + manual, and pushes to `main` touching its inputs; pull requests touching them (build only, no push) | builds the base image (an instrumented R) and pushes it to GHCR |
-| [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/` or `instrumentation/`, daily | checks that every patch still applies to R trunk, in order |
+| [`patches-apply.yml`](./.github/workflows/patches-apply.yml) | pull requests touching `patches/`, `features/` or `instrumentation/`, daily | checks that every patch still applies to R trunk, in order |
 | [`cflite-pr.yml`](./.github/workflows/cflite-pr.yml)     | manual (disabled) | builds the harnesses and fuzzes what the change affects |
 | [`cflite-batch.yml`](./.github/workflows/cflite-batch.yml) | manual (disabled) | fuzzes every target and grows the stored corpus; the only way the deferred targets get fuzzed |
 | [`cflite-prune.yml`](./.github/workflows/cflite-prune.yml) | manual (disabled) | minimises the stored corpus |
@@ -306,12 +326,13 @@ the work: `R_BUILD_ONLY` (build and install R, then stop — used when baking
 the base image) and `R_PREBUILT` (skip the R build, use an existing install —
 used by [`.clusterfuzzlite/build.sh`](./.clusterfuzzlite/build.sh)).
 
-Two more exist for the checks on `patches/` and `instrumentation/` (see
-[Carried changes to R](#carried-changes-to-r)): `R_PATCH_ONLY` stops after applying the patches, and
-`R_PATCH_STRICT` turns a patch that does not apply (or has already landed)
-into a failure rather than a log line. `patches-apply.yml` uses both on every
-pull request touching either directory and once a day, since trunk moves daily and a
-patch can go stale without anyone touching this repository; the pull-request
+Two more exist for the checks on `patches/`, `features/` and
+`instrumentation/` (see [Carried changes to R](#carried-changes-to-r)):
+`R_PATCH_ONLY` stops after applying the patches, and `R_PATCH_STRICT` turns
+a patch that does not apply (or has already landed) into a failure rather
+than a log line. `patches-apply.yml` uses both on every pull request
+touching any of these directories and once a day, since trunk moves daily
+and a patch can go stale without anyone touching this repository; the pull-request
 runs of `base-image.yml` use the latter to also catch a patch that applies but
 does not compile.
 

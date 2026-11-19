@@ -37,9 +37,9 @@ LIBZSTD_VERSION="${LIBZSTD_VERSION:-1.5.7}"
 # Two more serve the CI checks on patches/ (.github/workflows/patches-apply.yml
 # and the pull-request runs of base-image.yml):
 #
-#   R_PATCH_STRICT=1   a patch (patches/ or instrumentation/) that does not
-#                      apply, or is already applied, fails the build instead
-#                      of being reported and skipped
+#   R_PATCH_STRICT=1   a patch (patches/, features/ or instrumentation/) that
+#                      does not apply, or is already applied, fails the build
+#                      instead of being reported and skipped
 #   R_PATCH_ONLY=1     apply the patches, then stop before configuring R
 #
 # All four are unset in the OSS-Fuzz build, which builds R from source as usual.
@@ -59,19 +59,24 @@ else
     cd "$R_SOURCE"
 
     ####################################################################
-    # Local patches and instrumentation
+    # Local patches, features and instrumentation
     ####################################################################
-    # Two directories of patches are applied to the R source, in filename
-    # order within each (hence the numeric prefixes -- one patch may
-    # depend on an earlier one), patches/ first:
+    # Three directories of patches are applied to the R source, in
+    # filename order within each (hence the numeric prefixes -- one patch
+    # may depend on an earlier one), in this order:
     #
     #   patches/          fixes for defects in R that have not landed yet.
     #                     Temporary by nature: delete each one once the
     #                     fix is in trunk.
+    #   features/         upstream proposals that have not landed, carried
+    #                     because they make fuzzing faster.  Each is
+    #                     generated from its pull request by a script
+    #                     (scripts/sync-compiler.sh); delete it once it
+    #                     lands.
     #   instrumentation/  changes that make R easier to fuzz but fix
     #                     nothing -- poll intervals, limits, hooks.
     #                     Permanent, never for upstream, and may assume
-    #                     the fixes above are in place.
+    #                     the changes above are in place.
     #
     # The fixes are not cosmetic.  Fuzzing an R with a known crash is
     # worse than it sounds: libFuzzer replays the entire stored corpus at
@@ -85,9 +90,9 @@ else
     # take down every target.  Two failure modes are worth telling apart
     # in the log:
     #
-    #   "already applied"  the fix landed upstream -- delete the patch
-    #                      (for instrumentation/ this cannot legitimately
-    #                      happen, and is reported as such)
+    #   "already applied"  the fix or feature landed upstream -- delete the
+    #                      patch (for instrumentation/ this cannot
+    #                      legitimately happen, and is reported as such)
     #   "does not apply"   context drifted -- the bug is probably still
     #                      live, so the patch needs rebasing
     apply_patch_dir() {
@@ -103,11 +108,17 @@ else
                 echo "ossfuzz.sh: $kind $name: applied"
                 n_applied=$((n_applied + 1))
             elif patch -p1 -R --dry-run --force --silent < "$p" >/dev/null 2>&1; then
-                if [ "$kind" = patch ]; then
-                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
-                else
-                    echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- did trunk adopt it? check" >&2
-                fi
+                case "$kind" in
+                    patch)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- fixed upstream? delete it" >&2
+                        ;;
+                    feature)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- landed upstream? delete it" >&2
+                        ;;
+                    *)
+                        echo "ossfuzz.sh: $kind $name: ALREADY APPLIED -- did trunk adopt it? check" >&2
+                        ;;
+                esac
                 n_already=$((n_already + 1))
             else
                 echo "ossfuzz.sh: $kind $name: DOES NOT APPLY -- skipping, needs rebasing" >&2
@@ -120,16 +131,17 @@ else
         # that no longer applies, or has landed upstream, must fail there
         # so it gets rebased or deleted before it reaches a real build.
         if [ -n "${R_PATCH_STRICT:-}" ] && [ $((n_already + n_failed)) -gt 0 ]; then
-            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) $kind(es) above" >&2
+            echo "ossfuzz.sh: R_PATCH_STRICT set -- failing on the $((n_already + n_failed)) $(basename "$dir")/ patch(es) above" >&2
             exit 1
         fi
     }
 
     apply_patch_dir "$REPO/patches" patch
+    apply_patch_dir "$REPO/features" feature
     apply_patch_dir "$REPO/instrumentation" instrumentation
 
     if [ -n "${R_PATCH_ONLY:-}" ]; then
-        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches and instrumentation applied, stopping before the R build"
+        echo "ossfuzz.sh: R_PATCH_ONLY set -- patches, features and instrumentation applied, stopping before the R build"
         exit 0
     fi
 

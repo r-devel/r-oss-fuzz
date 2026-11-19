@@ -90,10 +90,10 @@ what makes a report from this target unambiguous.
 Nearly all R code that runs in a session is byte-compiled: package code at
 install time, everything else by the JIT after a call or two. The harness
 therefore compiles each top-level expression with `compiler::compile()`
-before evaluating it, with the execution budget paused. Closures the input
-defines are created with compiled bodies (`MAKECLOSURE`), top-level loops are
-compiled, and an expression the compiler declines runs through the AST
-interpreter, which is also the JIT's fallback. The AST interpreter still
+before evaluating it. Closures the input defines are created with compiled
+bodies (`MAKECLOSURE`), top-level loops are compiled, and an expression the
+compiler declines runs through the AST interpreter, which is also the JIT's
+fallback. The AST interpreter still
 sees the `:` wrapper, promise code and whatever the compiler refuses, so
 both interpreters are exercised, in roughly the proportion a session has.
 
@@ -102,7 +102,18 @@ on their second call, top-level loops only in the global environment), keeps
 a cache across inputs that would make one input's compilation depend on an
 earlier one, and catches errors raised inside the compiler, which would
 swallow a budget error and leave the budget switched off. Compiling from the
-harness avoids all three and costs 1 to 5 ms per expression under ASAN.
+harness avoids all three.
+
+Two compilers can sit behind `compiler::compile()`. Stock R's is written in
+R (`cmp.R`) and takes 1 to 5 ms per expression under ASAN, which is most of
+the time an input takes: in a strict-barrier build without sanitizers,
+compilation is 97-100% of each seed input's compile and eval time.
+[`features/0001`](../features/0001-compiler-native-byte-code-compiler.patch)
+carries an upstream proposal for one written in C (`bccompile.c`), 43x
+faster on the same expressions and emitting identical byte-code, which
+`compiler::compile()` uses whenever it is built in. If that patch stops
+applying, the harness compiles with `cmp.R` again; the rest of this section
+holds for both, except where it says otherwise.
 
 The compiler needs two things from the sandbox, both in
 `fuzz_target_init`. It refuses an environment whose chain does not end
@@ -118,13 +129,17 @@ the `COLON` and `SEQLEN` instructions, and `prod(seq_len(1e9))` folded at
 compile time, would bypass the caps. Finally, the compiler's `isBaseVar()`
 compares frames by identity with `baseenv()`, which decides whether a
 `break` or `next` inside a conditional compiles to a jump or to a loop
-context; it is rebound in the compiler namespace to accept the named frame,
-so loops compile the way a session's do. `tests/eval.c` checks all of this:
+context, and whether a call on literals is constant-folded; it is rebound
+in the compiler namespace to accept the named frame, so loops compile the
+way a session's do. The rebinding reaches only `cmp.R`: `bccompile.c` makes
+the same identity test in C, and
+[`instrumentation/0007`](../instrumentation/0007-bccompile-accept-base-named-frame-as-base.patch)
+makes it accept the named frame too. `tests/eval.c` checks all of this:
 closures come back with byte-code bodies, a loop with a conditional break
 has no `STARTLOOPCNTXT`, `seq_along` is inlined where `seq_len` is called,
 and every bound below holds on the compiled path.
 
-The compiler's own code is byte-compiled base R and runs under the same
+`cmp.R` is byte-compiled base R and runs under the same
 budget as the code it produces; a compile the budget cuts off ends the input
 with an error, since running the expression uncompiled would evade the
 limit. The budget used to pause for compilation, leaving the parsed-tree
@@ -132,9 +147,13 @@ limits as its only bound, but constant folding re-walks every subtree at
 each level of nesting, so compile time is quadratic in depth: four
 expressions nested 62 calls deep (270 bytes) took over 4 s under ASAN and
 timed out on the bots. Compiling an ordinary input costs a few hundred
-interrupt checks of the 20000. Constant folding evaluates base functions on
-literals only, and a warm-up input at start-up loads the compiler's
-internals before fuzzing begins, so every input sees the same R.
+interrupt checks of the 20000. `bccompile.c` never checks for interrupts,
+so the budget does not see it, and the parsed-tree limits are its only
+bound again. They suffice: those four expressions compile in 14 ms in the
+same build, against 597 ms with `cmp.R`. Constant folding
+evaluates base functions on literals only, and a warm-up input at start-up
+loads the compiler's internals before fuzzing begins, so every input sees
+the same R.
 
 ## Limits
 
@@ -143,7 +162,7 @@ internals before fuzzing begins, so every input sees the same R.
 | input size | 8 KiB, valid UTF-8, no embedded NUL | harness, before parsing |
 | parsed tree | depth 64, 1024 nodes | post-parse walk (`eval_tree_within_budget`) |
 | vector heap | 8 MiB (`R_VSIZE` and `R_MAX_VSIZE`) | R's allocator; an ordinary R error |
-| compilation | the input's budget and CPU backstop, like execution | the same hook; `eval_source` ends the input |
+| compilation | with `cmp.R`, the input's budget and CPU backstop, like execution; with `bccompile.c`, the parsed-tree limits | the same hook; `eval_source` ends the input |
 | execution | 20000 interrupt checks per input | `R_PolledEvents` hook (`eval_poll_budget`) |
 | execution, backstop | 1 CPU second, checked at the same points | the same hook |
 | recursion | R's `expressions` limit and its C stack check at 48 MiB, on the R thread's 1 GiB stack | R; an ordinary R error |
@@ -238,9 +257,12 @@ environment is not needed to reproduce a crash: run the testcase with
 R_VSIZE=8Mb R_MAX_VSIZE=8Mb Rscript --vanilla testcase.R
 ```
 
-If it crashes plain R, that is the report. `Rscript` runs the same compiler
-through the JIT, so a byte-code finding normally reproduces there too; one
-that depends on a top-level loop or a closure called only once being
+If it crashes plain R, that is the report. If the crash is inside
+`bccompile.c`, it is not an R bug but one in the carried `features/0001`,
+and belongs on its pull request. Otherwise `Rscript` runs a compiler that
+emits the same byte-code through the JIT, so a byte-code finding normally
+reproduces there too; one that depends on a top-level loop or a closure
+called only once being
 compiled can be reproduced by wrapping the testcase in a function and
 calling `compiler::cmpfun()` on it, or by compiling each top-level
 expression with `compiler::compile()` before evaluating it. A testcase that
