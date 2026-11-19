@@ -32,6 +32,9 @@ tests/, scripts/  standalone checks of a harness's boundaries (tests/eval.c),
                   (tests/datetime.c) and of common.h's timeout diagnostics
                   (tests/timeout.c), built and run by scripts/check-*.sh
                   against a local R;
+                  scripts/check-wrappers.sh runs every target's seeds with
+                  R's errors shown and fails on a call to a function R
+                  cannot find (a slot that can never succeed);
                   scripts/ossfuzz-status.py summarizes the targets' recent
                   OSS-Fuzz sessions and the open testcases (needs an
                   oss-fuzz.com session cookie, see its header)

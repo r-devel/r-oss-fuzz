@@ -36,21 +36,20 @@ Found by OSS-Fuzz:
 
 Replaces 0046 (r-svn PR #375, gsub/regexec free-before-error), which
 did not cover the warning raised inside wtransChar2().  Generated
-against a tree with the earlier patches applied (0014 changes
-reEncodeIconv()'s signature, 0032 touches installTrChar()), so it has to
-stay after them in the sequence; the upstream version differs only in
-the reEncodeIconv() length argument.
+against trunk with the earlier patches applied (0032 touches
+installTrChar()), so it has to stay after them in the sequence.  Trunk
+gained reEncodeIconv()'s length argument in r90928 (PR#19288, formerly
+carried here as 0014); the upstream PR below predates that and passes
+no length.
 
 Upstream status: r-devel/r-svn PR #400 (three commits; no Bugzilla
 report yet).  First proposed here as r-oss-fuzz PR #74 (patch 0055),
 which was closed without merging.
 Delete this patch once the fix lands in R trunk.
 
-diff --git a/src/main/grep.c b/src/main/grep.c
-index 40cecd3..5debb36 100644
 --- a/src/main/grep.c
 +++ b/src/main/grep.c
-@@ -61,6 +61,7 @@ As from R 4.1.0 we translate latin1 strings in a non-latin1-locale to UTF-8.
+@@ -61,6 +61,7 @@
  /* How many encoding warnings to give */
  #define NWARN 5
  
@@ -58,7 +57,7 @@ index 40cecd3..5debb36 100644
  #include <Defn.h>
  #include <Internal.h>
  #include <R_ext/RS.h>  /* for R_Calloc/R_Free */
-@@ -542,7 +543,93 @@ R_pcre_prepare(const char *pattern, SEXP subject, bool use_UTF8,
+@@ -542,7 +543,93 @@
  }
  #endif
  
@@ -153,7 +152,7 @@ index 40cecd3..5debb36 100644
  // FIXME: Do not rebuild locale tables repeatedly.
  // FIXME: There is no documented way to free locale tables with PCRE2.
  //        Using free() would not work on Windows if PCRE2 is dynamically
-@@ -834,6 +921,15 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -834,6 +921,15 @@
  
  	    R_pcre_prepare(split, x, use_UTF8, false, true, &tables, &re_pcre,
  	                 &re_pe);
@@ -169,7 +168,7 @@ index 40cecd3..5debb36 100644
  #endif
  	    vmax2 = vmaxget();
  	    for (i = itok; i < len; i += tlen) {
-@@ -939,14 +1035,10 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -939,14 +1035,10 @@
  		}
  		vmaxset(vmax2);
  	    }
@@ -188,7 +187,7 @@ index 40cecd3..5debb36 100644
  	} else if (!useBytes && use_UTF8) { /* ERE in wchar_t */
  	    regex_t reg;
  	    regmatch_t regmatch[1];
-@@ -966,6 +1058,10 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -966,6 +1058,10 @@
  		error(_("'split' string %lld is invalid"), (long long)itok+1);
  	    if ((rc = tre_regwcomp(&reg, wsplit, cflags)))
  		reg_report(rc, &reg, translateChar(STRING_ELT(tok, itok)));
@@ -199,7 +198,7 @@ index 40cecd3..5debb36 100644
  	    bool ascii_split = IS_ASCII(STRING_ELT(tok, itok));
  
  	    vmax2 = vmaxget();
-@@ -1025,7 +1121,7 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1025,7 +1121,7 @@
  				                   ascii_split && ascii_xi));
  		vmaxset(vmax2);
  	    }
@@ -208,7 +207,7 @@ index 40cecd3..5debb36 100644
  	} else { /* ERE in normal chars -- single byte */
  	         /* previously used also with MBCS */
  	    regex_t reg;
-@@ -1055,6 +1151,11 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1055,6 +1151,11 @@
  
  	    if(rc) reg_report(rc, &reg, split);
  
@@ -220,7 +219,7 @@ index 40cecd3..5debb36 100644
  	    vmax2 = vmaxget();
  	    for (i = itok; i < len; i += tlen) {
  		SEXP t;
-@@ -1143,7 +1244,7 @@ attribute_hidden SEXP do_strsplit(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1143,7 +1244,7 @@
  		}
  		vmaxset(vmax2);
  	    }
@@ -229,7 +228,7 @@ index 40cecd3..5debb36 100644
  	}
  	vmaxset(vmax);
      }
-@@ -1383,6 +1484,16 @@ attribute_hidden SEXP do_grep(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1383,6 +1484,16 @@
  	if (rc) reg_report(rc, &reg, spat);
      }
  
@@ -246,7 +245,7 @@ index 40cecd3..5debb36 100644
      PROTECT(ind = allocVector(LGLSXP, n));
      vmax = vmaxget();
      for (i = 0 ; i < n ; i++) {
-@@ -1453,22 +1564,7 @@ attribute_hidden SEXP do_grep(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -1453,22 +1564,7 @@
  	if (invert ^ LOGICAL(ind)[i]) nmatches++;
      }
  
@@ -270,10 +269,11 @@ index 40cecd3..5debb36 100644
  
      if (PRIMVAL(op)) {/* grepl case */
  	UNPROTECT(1); /* ind */
-@@ -2246,6 +2342,16 @@ attribute_hidden SEXP do_gsub(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -2247,6 +2343,16 @@
+ 	    replen = wcslen(wrep);
  	}
      }
- 
++
 +    regex_cleanup_info ci;
 +    RCNTXT cntxt;
 +#ifdef HAVE_PCRE2
@@ -283,11 +283,10 @@ index 40cecd3..5debb36 100644
 +    regex_cleanup_begin(&ci, &cntxt, call, fixed_opt, perl_opt, &reg, tables,
 +			re_pcre, re_pe, NULL);
 +#endif
-+
+ 
      PROTECT(ans = allocVector(STRSXP, n));
      vmax = vmaxget();
-     for (i = 0 ; i < n ; i++) {
-@@ -2502,21 +2608,7 @@ attribute_hidden SEXP do_gsub(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -2504,21 +2610,7 @@
  	vmaxset(vmax);
      }
  
@@ -310,7 +309,7 @@ index 40cecd3..5debb36 100644
  
    exit_gsub: 
      SHALLOW_DUPLICATE_ATTRIB(ans, text);
-@@ -3104,6 +3196,16 @@ attribute_hidden SEXP do_regexpr(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -3108,6 +3200,16 @@
  	if (rc) reg_report(rc, &reg, spat);
      }
  
@@ -327,7 +326,7 @@ index 40cecd3..5debb36 100644
      if (PRIMVAL(op) == 0) { /* regexpr */
  	SEXP matchlen, capture_start, capturelen;
  	int *is, *il;
-@@ -3289,24 +3391,9 @@ attribute_hidden SEXP do_regexpr(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -3293,24 +3395,9 @@
  	}
      }
  
@@ -355,7 +354,7 @@ index 40cecd3..5debb36 100644
  
      UNPROTECT(2);
      return ans;
-@@ -3395,9 +3482,15 @@ attribute_hidden SEXP do_regexec(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -3399,9 +3486,15 @@
  	error(_("regcomp error: '%s'"), errbuf);
      }
  
@@ -372,22 +371,21 @@ index 40cecd3..5debb36 100644
  
      PROTECT(ans = allocVector(VECSXP, n));
  
-@@ -3467,9 +3560,7 @@ attribute_hidden SEXP do_regexec(SEXP call, SEXP op, SEXP args, SEXP env)
+@@ -3471,10 +3564,8 @@
  	}
      }
  
 -    free(pmatch);
--
--    tre_regfree(&reg);
 +    regex_cleanup_end(&ci, &cntxt);
  
+-    tre_regfree(&reg);
+-
      UNPROTECT(2);
  
-diff --git a/src/main/sysutils.c b/src/main/sysutils.c
-index 26fadc0..77a7ee7 100644
+     return ans;
 --- a/src/main/sysutils.c
 +++ b/src/main/sysutils.c
-@@ -1720,8 +1720,31 @@ static R_INLINE nttype_t needsTranslation(SEXP x)
+@@ -1720,8 +1720,31 @@
  static void *latin1_obj = NULL, *utf8_obj=NULL, *ucsmb_obj=NULL,
      *ucsutf8_obj=NULL;
  
@@ -420,7 +418,7 @@ index 26fadc0..77a7ee7 100644
  static int translateToNative(const char *ans, R_StringBuffer *cbuff,
  			     nttype_t ttype, int mustWork)
  {
-@@ -1825,26 +1848,20 @@ next_char:
+@@ -1825,26 +1848,20 @@
      }
      *outbuf = '\0';
      if (mustWork && failed) {
@@ -452,7 +450,7 @@ index 26fadc0..77a7ee7 100644
  }
  
  static const char *copyAndFreeStringBuffer(R_StringBuffer *cbuff)
-@@ -1895,11 +1912,9 @@ const char *translateCharFP2(SEXP x)
+@@ -1895,11 +1912,9 @@
      if (t == NT_NONE) return ans;
  
      R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
@@ -467,7 +465,7 @@ index 26fadc0..77a7ee7 100644
  }
  
  SEXP installTrChar(SEXP x)
-@@ -1910,8 +1925,13 @@ SEXP installTrChar(SEXP x)
+@@ -1910,8 +1925,13 @@
  
      R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
      // For back-compatibility this allows installing
@@ -483,7 +481,7 @@ index 26fadc0..77a7ee7 100644
  
      /* install() raises this itself, but then the buffer would leak. */
      if (strlen(cbuff.data) > MAXIDSIZE) {
-@@ -1920,6 +1940,8 @@ SEXP installTrChar(SEXP x)
+@@ -1920,6 +1940,8 @@
      }
      SEXP Sans = install(cbuff.data);
      R_FreeStringBuffer(&cbuff);
@@ -492,7 +490,7 @@ index 26fadc0..77a7ee7 100644
      return Sans;
  }
  
-@@ -1956,7 +1978,7 @@ static R_INLINE nttype_t needsTranslationUTF8(SEXP x)
+@@ -1956,7 +1978,7 @@
  }
  
  /* Translates string in "ans" to UTF-8 returning it in string
@@ -501,7 +499,7 @@ index 26fadc0..77a7ee7 100644
  static int translateToUTF8(const char *ans, R_StringBuffer *cbuff,
  			     nttype_t ttype, int mustWork)
  {
-@@ -2012,31 +2034,28 @@ next_char:
+@@ -2012,31 +2034,28 @@
      *outbuf = '\0';
      Riconv_close(obj);
      if (mustWork && failed) {
@@ -545,7 +543,7 @@ index 26fadc0..77a7ee7 100644
  }
  
  /* This may return a R_alloc-ed result, so the caller has to manage the
-@@ -2078,11 +2097,9 @@ const char *trCharUTF82(SEXP x)
+@@ -2078,11 +2097,9 @@
      if (t == NT_NONE) return ans;
  
      R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
@@ -560,7 +558,7 @@ index 26fadc0..77a7ee7 100644
  }
  
  /* Decides type of translation needed to get wchar_t*. */
-@@ -2132,8 +2149,8 @@ static void *latin1_wobj = NULL, *utf8_wobj=NULL;
+@@ -2132,8 +2149,8 @@
     NB: that wchar_t is UCS-4 is an assumption, but not easy to avoid.
  */
  
@@ -571,14 +569,14 @@ index 26fadc0..77a7ee7 100644
  static int translateToWchar(const char *ans, R_StringBuffer *cbuff,
                              nttype_t ttype, int mustWork)
  {
-@@ -2205,34 +2222,28 @@ next_char:
+@@ -2205,34 +2222,28 @@
      *((wchar_t *) outbuf) = L'\0'; /* terminate wide string */
      if(ttype == NT_FROM_NATIVE) Riconv_close(obj);
      if (mustWork && failed) {
 -	const void *vmax = vmaxget();
 -	const char *native_buf = reEnc4(cbuff->data,
--				       (size_t) (outbuf - cbuff->data),
--				       TO_WCHAR, "", 2);
+-					(size_t) (outbuf - cbuff->data),
+-					TO_WCHAR, "", 2);
 -
 -	/* copy to truncate (and mark as truncated) */
 +	/* As in translateToUTF8(): no R_alloc() while the buffers are
@@ -617,7 +615,7 @@ index 26fadc0..77a7ee7 100644
  }
  
  /* This may return a R_alloc-ed result, so the caller has to manage the
-@@ -2259,11 +2270,9 @@ const wchar_t *wtransChar2(SEXP x)
+@@ -2259,11 +2270,9 @@
  	return wfromASCII(CHAR(x), LENGTH(x));
  
      R_StringBuffer cbuff = {NULL, 0, MAXELTSIZE};
