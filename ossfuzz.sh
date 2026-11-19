@@ -390,6 +390,22 @@ if [ "${SANITIZER:-}" = introspector ]; then
     rm -f "$OUT/r-install/lib/R/lib/libR.a"
 else
     R_LINK_FLAGS="-L$R_LIB_DIR -lR"
+
+    # R dlopen()s the base packages' shared libraries itself, and the
+    # OSS-Fuzz coverage report renders only the libraries ldd lists for
+    # a fuzzer, so the C code of stats, utils, grDevices, graphics, tools
+    # and methods was missing from it -- everything the readtable, colors
+    # and coerce targets reach beyond libR.  Linking them as ordinary
+    # dependencies puts them on that list.  They have no SONAME, so -l:
+    # records the bare file name, found at run time through one rpath per
+    # package; R's own dlopen() of the same file then gets the copy
+    # already loaded.  --no-as-needed keeps them although the harnesses
+    # reference none of their symbols.
+    R_LINK_FLAGS="$R_LINK_FLAGS -Wl,--no-as-needed"
+    for pkg in stats utils grDevices graphics tools methods; do
+        R_LINK_FLAGS="$R_LINK_FLAGS -L$R_HOME/library/$pkg/libs -l:$pkg.so"
+        R_LINK_FLAGS="$R_LINK_FLAGS -Wl,-rpath,\$ORIGIN/r-install/lib/R/library/$pkg/libs"
+    done
 fi
 
 for src in "$REPO"/harnesses/*.c; do
