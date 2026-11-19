@@ -44,6 +44,7 @@ RUN /opt/checkout-r.sh
 # the two setups cannot drift apart in how R itself is built.
 COPY ossfuzz.sh /opt/ossfuzz.sh
 COPY patches /opt/patches
+COPY features /opt/features
 COPY instrumentation /opt/instrumentation
 COPY docker/base/build-r.sh /opt/build-r.sh
 
