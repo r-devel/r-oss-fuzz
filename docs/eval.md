@@ -109,7 +109,7 @@ R (`cmp.R`) and takes 1 to 5 ms per expression under ASAN, which is most of
 the time an input takes: in a strict-barrier build without sanitizers,
 compilation is 97-100% of each seed input's compile and eval time.
 [`features/0001`](../features/0001-compiler-native-byte-code-compiler.patch)
-carries an upstream proposal for one written in C (`bccompile.c`), 43x
+carries an upstream proposal for one written in C (`bccompile.c`), 53x
 faster on the same expressions and emitting identical byte-code, which
 `compiler::compile()` uses whenever it is built in. If that patch stops
 applying, the harness compiles with `cmp.R` again; the rest of this section

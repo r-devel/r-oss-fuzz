@@ -200,7 +200,7 @@ script, never edited by hand, and deleted once it lands. Currently one:
 
 | Patch | Does | Upstream | Sync with |
 |-------|------|----------|-----------|
-| `0001-compiler-native-byte-code-compiler` | R's byte-code compiler in C (`src/main/bccompile.c`), used by `compiler::compile()`, `cmpfun()` and the JIT in place of `cmp.R`, with identical output. The `eval` target compiles every input, and `cmp.R` is R code: in a strict-barrier build without sanitizers, compilation is 97-100% of the time each seed input takes, and the C compiler does it 43x faster. | [r-devel/r-svn#463](https://github.com/r-devel/r-svn/pull/463), R Bugzilla 19297 | `scripts/sync-compiler.sh` |
+| `0001-compiler-native-byte-code-compiler` | R's byte-code compiler in C (`src/main/bccompile.c`), used by `compiler::compile()`, `cmpfun()` and the JIT in place of `cmp.R`, with identical output. The `eval` target compiles every input, and `cmp.R` is R code: in a strict-barrier build without sanitizers, compilation is 97-100% of the time each seed input takes, and the C compiler does it 53x faster. | [r-devel/r-svn#463](https://github.com/r-devel/r-svn/pull/463), R Bugzilla 19297 | `scripts/sync-compiler.sh` |
 
 Run the sync script after the pull request changes (`--check` only reports
 whether the patch is behind it), then the patch checks below. If the patch

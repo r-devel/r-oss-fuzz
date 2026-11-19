@@ -89,7 +89,7 @@ The eval target byte-compiles every top-level expression before running
 it (docs/eval.md).  cmp.R is R code, and compiling an input costs far
 more than running it: in a strict-barrier build without sanitizers,
 over the eval seeds, compilation is 97-100% of each input's compile and
-eval time, and bccompile.c compiles the same expressions 43x faster
+eval time, and bccompile.c compiles the same expressions 53x faster
 into identical byte-code.  compiler::compile() and the JIT use it
 whenever it is built in, so the harness needs no change, and if this
 patch stops applying they fall back to cmp.R.
