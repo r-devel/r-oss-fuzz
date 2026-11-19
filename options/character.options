@@ -1,0 +1,8 @@
+# The harness rejects inputs over 64 KiB (FUZZ_MAX_INPUT in
+# harnesses/character.c); tell libFuzzer so it does not spend mutations on
+# inputs that will be skipped.
+[libfuzzer]
+max_len = 65536
+# Half of the sessions give slow inputs less energy (README.md, "Engine
+# options").
+entropic_scale_per_exec_time = random(0, 1)
