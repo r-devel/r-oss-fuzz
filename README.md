@@ -227,6 +227,7 @@ changes above are in place. Each header says what it is for. Currently:
 | `0005-deparse-poll-for-interrupts` | `deparse` polls for interrupts every 1024 appends to its line buffer (freeing the buffer if the poll unwinds), so the `eval` target's budget can stop `as.character()` of a list nested tens of thousands deep, whose deparse is quadratic in the depth and otherwise runs for minutes; R itself never polls there |
 | `0006-sock-listen-on-loopback-only` | R's server sockets bind to 127.0.0.1 instead of every interface, so the listening port the `sockets` target holds while an input runs cannot be reached, or fed input, from another host |
 | `0007-bccompile-accept-base-named-frame-as-base` | the C compiler of `features/0001` treats a frame named like base's package frame as base, as `cmp.R` does once the `eval` harness has rebound `isBaseVar`, so loops with a conditional `break` compile to jumps and calls on literals are folded under either compiler; goes when `features/0001` does |
+| `0008-memory-thread-check-reset-on-fork` | in a forked child, the first thread to call into R becomes the one strict barrier's thread check accepts, so a child of AFL++'s forkserver can run R on the new thread the harness starts for it; macOS and glibc 2.43 give that thread a new `pthread_t`, which the check would otherwise kill ("Wrong thread calling 'Rf_protect'") |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.
