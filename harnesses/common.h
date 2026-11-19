@@ -678,12 +678,17 @@ static void fuzz_do_eval(void *data)
 }
 
 /* Evaluate malformed-input-heavy targets without printing each expected
- * R error. R_tryEvalSilent installs its own top-level error context. */
+ * R error. R_tryEvalSilent installs its own top-level error context.
+ * FUZZ_PRINT_ERRORS prints them instead, for scripts/check-wrappers.sh. */
 static void fuzz_eval_silent(SEXP call, SEXP env)
 {
     int error = 0;
     fuzz_label_enter(call);
+#ifdef FUZZ_PRINT_ERRORS
+    R_tryEval(call, env, &error);
+#else
     R_tryEvalSilent(call, env, &error);
+#endif
 }
 
 /*
@@ -720,6 +725,12 @@ static Rboolean fuzz_set_string(SEXP vec, const char *str)
  * closure and call it with Rf_lang*; that keeps the C side free of
  * argument plumbing.  The source is harness-authored (never fuzz
  * input), so a parse or evaluation failure is a harness bug: abort.
+ *
+ * The closure is created in the global environment so its body sees
+ * the attached packages.  Created in base it would not: base's enclosure
+ * is the empty environment, so every call to a grDevices, utils or
+ * stats function fails with "could not find function", silently under
+ * fuzz_eval_silent.  scripts/check-wrappers.sh checks for that.
  */
 static SEXP fuzz_make_wrapper(const char *source)
 {
@@ -730,7 +741,7 @@ static SEXP fuzz_make_wrapper(const char *source)
     if (status != PARSE_OK || XLENGTH(parsed) != 1)
         abort();
 
-    wrapper = Rf_eval(VECTOR_ELT(parsed, 0), R_BaseEnv);
+    wrapper = Rf_eval(VECTOR_ELT(parsed, 0), R_GlobalEnv);
     Rf_unprotect(2);
     return wrapper;
 }
