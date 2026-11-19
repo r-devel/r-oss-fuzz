@@ -181,18 +181,27 @@ by `ossfuzz.sh` using the R it just built, and staged into the same
 
 ## Engine options
 
-Every target's `options/<name>.options` has a `[libfuzzer]` section with
-two settings; a new target should copy them.
+Every target's `options/<name>.options` has a `[libfuzzer]` section that
+sets `max_len` to the harness's `FUZZ_MAX_INPUT`; a new target should copy
+it. Without it libFuzzer grows inputs towards 1 MB, and every mutation past
+the harness's limit is an execution that does nothing.
 
-- `max_len` is the harness's `FUZZ_MAX_INPUT`. Without it libFuzzer grows
-  inputs towards 1 MB, and every mutation past the harness's limit is an
-  execution that does nothing.
-- `entropic_scale_per_exec_time = random(0, 1)`. ClusterFuzz expands
-  `random(a, b)` afresh for each session, so half the sessions run
-  libFuzzer's entropic schedule unchanged and half scale each input's
-  energy down by how slowly it runs.
+The libFuzzer sessions are also split on `-entropic_scale_per_exec_time`:
+at start-up, `LLVMFuzzerInitialize` in `harnesses/common.h` tosses a coin
+and appends the flag to argv, so half the sessions run libFuzzer's entropic
+schedule unchanged and half scale each input's energy down by how slowly it
+runs. The session's log says which (`fuzz: this session runs with ...`),
+and the flag given on the command line wins. `ossfuzz.sh` compiles this in
+for libFuzzer builds only.
 
-The second exists because libFuzzer, unlike AFL, runs every slow input in
+ClusterFuzz has a syntax for this, `random(0, 1)` as an option's value, but
+it cannot go in `options/`: OSS-Fuzz's build check (`run_fuzzer`, under
+`bad_build_check`) pastes option values into `bash -c` unquoted, the
+parentheses are a syntax error, and every target counts as broken. The same
+check runs after each OSS-Fuzz build, so this would fail the daily build,
+not just CI.
+
+The split exists because libFuzzer, unlike AFL, runs every slow input in
 full. AFL++ calibrates a short per-execution timeout and skips inputs past
 it; libFuzzer waits out the 25 s `-timeout`, and every session starts by
 re-running the whole corpus, slow units included. On the heavy-tailed

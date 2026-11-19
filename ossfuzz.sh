@@ -10,7 +10,8 @@
 # Expected environment (provided by the OSS-Fuzz base-builder image):
 #   $CC, $CXX, $CFLAGS, $CXXFLAGS   compiler + sanitizer flags
 #   $LIB_FUZZING_ENGINE             the fuzzing engine to link against
-#   $SRC, $WORK, $OUT               source / scratch / output directories
+#   $FUZZING_ENGINE                 its name (libfuzzer, afl, ...)
+#   $SRC, $WORK, $OUT              source / scratch / output directories
 #
 # The R source tree is expected at $SRC/r-source (checked out by the
 # OSS-Fuzz Dockerfile).  Override with $R_SOURCE for local runs.
@@ -392,6 +393,13 @@ else
     R_LINK_FLAGS="-L$R_LIB_DIR -lR"
 fi
 
+# common.h appends a libFuzzer flag to argv at start-up (README.md, "Engine
+# options"); AFL's driver reads argv its own way.
+ENGINE_CFLAGS=
+if [ "${FUZZING_ENGINE:-}" = libfuzzer ]; then
+    ENGINE_CFLAGS=-DFUZZ_ENGINE_LIBFUZZER
+fi
+
 for src in "$REPO"/harnesses/*.c; do
     name=$(basename "$src" .c)
 
@@ -402,7 +410,7 @@ for src in "$REPO"/harnesses/*.c; do
             ;;
     esac
 
-    $CC $CFLAGS -fno-omit-frame-pointer \
+    $CC $CFLAGS $ENGINE_CFLAGS -fno-omit-frame-pointer \
         -I"$R_INCLUDE" \
         -c "$src" -o "$WORK/${name}.o"
 
