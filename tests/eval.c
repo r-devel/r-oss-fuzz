@@ -457,6 +457,27 @@ static void run_checks(void *unused)
     LLVMFuzzerTestOneInput(invalid_utf8, sizeof(invalid_utf8));
     LLVMFuzzerTestOneInput(nul, 0);
     LLVMFuzzerTestOneInput(nul, FUZZ_MAX_INPUT + 1);
+
+    /* Tier 2: computational primitives are in ... */
+    check("sum(cumsum(1:4))", 0, 20);
+    check("x <- c(1, 2, 3, 4); dim(x) <- c(2, 2); crossprod(x)[1, 1]", 0, 5);
+    check("x <- c(1, 2, 3, 4); dim(x) <- c(2, 2); (x %*% x)[2, 2]", 0, 22);
+    check("round(log(exp(2)), 6) + signif(123.4, 2)", 0, 122);
+    check("Mod(3+4i) + Re(1+2i) + Im(1+2i)", 0, 8);
+    check("f <- function(...) ...length() + ...elt(2); f(1, 7)", 0, 9);
+    check(".subset2(list(7), 1) + is.numeric(1) + is.call(quote(f(x)))", 0, 9);
+    check("length(as.call(list(quote(f), 1)))", 0, 2);
+    check("x <- 1:3; length(x) <- 5; is.na(x[5])", 0, 1);
+    /* ... and capabilities, evaluation and the ways past a limit are not. */
+    const char *tier2_blocked[] = {
+        "baseenv()", "emptyenv()", "as.environment(1)", "pos.to.env(1)",
+        "f <- ~x; 1", "Exec(quote(1))", "Tailcall(sum, 1)",
+        ".Primitive('sum')", "x <- 1; x@class <- 'example'",
+        "interactive()", "proc.time()", "tracemem(1)", "base::sum(1)"
+    };
+    for (size_t i = 0; i < sizeof(tier2_blocked) / sizeof(*tier2_blocked); i++)
+        check(tier2_blocked[i], 1, 0);
+
     check("40 + 2", 0, 42);
     puts("eval harness checks passed");
 }

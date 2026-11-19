@@ -96,7 +96,36 @@ static const char *const eval_primitives[] = {
     "UseMethod",
     /* rep allocates its result, so the vector heap bounds it; the compact
      * sequence builders are wrapped below. */
-    "rep", "seq_along"
+    "rep", "seq_along",
+    /* Tier 2 (docs/eval.md): the remaining computational primitives.
+     * Every result is allocated, so the vector heap bounds each call and
+     * the budget bounds the number of calls.  The primitives base has and
+     * this list leaves out are each a capability or a way past a limit:
+     * .Internal, .Primitive, the foreign-function interfaces (.C, .Call,
+     * .External, .Fortran and their graphics forms), environments
+     * (as.environment, baseenv, emptyenv, globalenv, pos.to.env,
+     * environment<-; and ~, which captures the caller's), <<- (assigns in
+     * the global environment when the name is not found), evaluation
+     * (Exec, Tailcall, forceAndCall, standardGeneric), on.exit,
+     * class<- and oldClass<- and @<- (slots are attributes, class
+     * included; see the wrappers), process state (.isMethodsDispatchOn,
+     * .cache_class, interactive, proc.time, gc.time, tracing, browser,
+     * lazyLoadDBfetch) and the namespace operators :: and :::. */
+    "log", "exp", "expm1", "log1p", "log2", "log10",
+    "sin", "cos", "tan", "sinpi", "cospi", "tanpi",
+    "asin", "acos", "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+    "gamma", "lgamma", "digamma", "trigamma",
+    "round", "signif", "sign",
+    "Re", "Im", "Mod", "Arg", "Conj",
+    "cumsum", "cumprod", "cummax", "cummin", "range",
+    "%*%", "crossprod", "tcrossprod",
+    "anyNA", "xtfrm", "nzchar", "enc2native", "enc2utf8",
+    "as.numeric", "as.call", "call", "expression", "length<-",
+    "storage.mode<-", "is.array", "is.atomic", "is.call", "is.expression",
+    "is.function", "is.language", "is.matrix", "is.name", "is.numeric",
+    "is.object", "is.pairlist", "is.raw", "is.recursive", "is.single",
+    "is.symbol", "isS4", "@", ".class2", ".subset", ".subset2",
+    "...elt", "...length", "...names", "declare", "unCfillPOSIXlt"
 };
 
 /*
