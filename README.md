@@ -62,6 +62,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `encoding`     | `iconv()` — conversion among UTF, legacy, and native encodings |
 | `eval`         | evaluation of R source over an allowlist of primitives, byte-compiled first as a session's code would be — closures, promises, scoping, control flow, vector indexing and arithmetic, attributes and S3 dispatch to the input's own methods (`eval.c` including `bcEval`, `envir.c`, `subset.c`, `subassign.c`, `arithmetic.c`, `attrib.c`, `objects.c`); see [`docs/eval.md`](./docs/eval.md) |
 | `format`       | `format` / `formatC` / `prettyNum` / `print` — number and string formatting (`format.c`, `paste.c`, `print*.c`) |
+| `formula`      | `terms` / `update.formula` / `model.frame` / `model.matrix` and `D` / `deriv` — formula expansion, contrasts and symbolic differentiation (stats `model.c`, `deriv.c`) |
 | `grep`         | the PCRE2 regex engine (`perl = TRUE`) through every `grep.c` entry point, plus `grepRaw()` |
 | `io`           | `readBin()` / `writeBin()` — typed binary I/O over raw vectors |
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |

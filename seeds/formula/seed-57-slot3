@@ -1,0 +1,1 @@
+	log1p(x) + expm1(y) + log2(x) + log10(y)
