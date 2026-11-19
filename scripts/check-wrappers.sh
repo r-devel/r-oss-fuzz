@@ -50,8 +50,8 @@ for name in "$@"; do
     R_HOME="$wrappers_r_home" \
         LD_LIBRARY_PATH="$wrappers_r_home/lib:${LD_LIBRARY_PATH:-}" \
         DYLD_FALLBACK_LIBRARY_PATH="$wrappers_r_home/lib" \
-        "$wrappers_build/$name" -runs=0 -timeout=10 "$corpus" > "$log" 2>&1 \
-        || true
+        "$wrappers_build/$name" -runs=0 -timeout=10 \
+        -artifact_prefix="$wrappers_build/" "$corpus" > "$log" 2>&1 || true
 
     if grep -q "could not find function" "$log"; then
         echo "check-wrappers.sh: $name: FAIL"
