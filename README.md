@@ -68,7 +68,7 @@ docker/base/      base image holding a prebuilt, instrumented R
 | `load`         | `load()` of `.RData` files — the v2/v3 path (`loadFromConn2`, `RestoreToEnv`; shares the deserializer with `unserialize`) and the pre-R-1.4 ASCII/binary/XDR readers in `saveload.c` that nothing else exercises |
 | `nmath`        | the `d`/`p`/`q` functions of every distribution and the special functions (gamma, beta, `psigamma`, `choose`, Bessel) on raw doubles — convergence and work-array sizing in `src/nmath` |
 | `parse`        | `R_ParseVector` — the lexer/parser                     |
-| `rd` \*        | `tools::parse_Rd()` — R documentation markup parsing  |
+| `rd`           | `tools::parse_Rd()` — R documentation markup parsing  |
 | `readtable`    | `read.table` / `read.csv` / `count.fields` / `write.table` — the header pre-reader, field counter and quoting writer in utils `io.c` that `scan` never reaches |
 | `scan`         | `scan()` — the delimited-text parser (`scan.c`)        |
 | `sockets`      | socket connections as a state machine over the loopback interface — `socketConnection` / `serverSocket` / `socketAccept` / `socketSelect` / `socketTimeout`, and reads and writes on sockets that were never opened, were refused, are connected, or have lost their peer (`sockconn.c`, `Rsock.c`, `connections.c`) |
@@ -92,10 +92,6 @@ backtracking once a back-reference is present, and internal assertions that
 `longjmp` out of `tre_compile()` and leak everything it had allocated — are
 not findings this project pursues. `agrep` is TRE-only, which is why it stays
 deferred; `grep` never reaches TRE and runs on OSS-Fuzz.
-`rd` is held back for a different reason: `parse_Rd()` never returns on an
-unterminated `\Sexpr` (still so in trunk r90938). The other bug its first
-runs hit, the `iconv()` leak of R Bugzilla 19134 (reached through
-`\encoding{}`), is fixed by `patches/0031`.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
