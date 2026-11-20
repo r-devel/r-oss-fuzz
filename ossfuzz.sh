@@ -382,14 +382,11 @@ mkdir -p "$SEED_STAGE/unserialize"
 # each target is promoted deliberately -- promoting one is just deleting
 # its name here.  agrep drives the bundled TRE engine, whose dormant
 # upstream means each fix must be hand-patched into R (grep, promoted,
-# passes perl = TRUE everywhere).  rd waits on parse_Rd() never returning
-# on an unterminated \Sexpr, still the case in trunk r90938; the other bug
-# its first runs hit, the iconv() leak of Bugzilla 19134 (through
-# \encoding{}), is fixed by patches/0031.
+# passes perl = TRUE everywhere).
 # ClusterFuzzLite is not so constrained (findings stay within this
 # repository's CI), so .clusterfuzzlite/build.sh clears the list and keeps
 # fuzzing everything.
-DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep rd}"
+DEFERRED_TARGETS="${DEFERRED_TARGETS-agrep}"
 
 # How each harness links R.  Normally that is the bundled libR.so.  The
 # introspector build (see step 1) links the whole static libR.a instead,
