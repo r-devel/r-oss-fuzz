@@ -167,6 +167,8 @@ static void fuzz_set_vsize_limit(void)
  * child that inherited the initialized R but no thread to run it on.
  * An atfork handler forgets the thread in the child, and the next job
  * starts a fresh one, which points R's stack check at its own stack.
+ * Strict barrier's thread check would reject that new thread wherever
+ * it gets a new pthread_t; instrumentation/0008 lets it in.
  */
 #ifndef FUZZ_R_STACK_SIZE
 # define FUZZ_R_STACK_SIZE ((size_t)1 << 30)

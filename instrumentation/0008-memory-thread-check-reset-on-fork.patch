@@ -1,0 +1,55 @@
+Let R's thread check accept a new thread after fork.
+
+A strict-barrier build turns on THREADCHECK: R_check_thread() records
+the first thread to call into R and R_Suicide()s when any other thread
+does.  The harnesses run R on a thread of their own (harnesses/common.h),
+and AFL++'s forkserver forks from the main thread after
+LLVMFuzzerInitialize, so every child starts R a new thread.  That
+thread's pthread_t matches the recorded one only if the thread library
+happens to put it where the old one was.  glibc 2.31 and 2.39 do, by
+handing it the dead thread's cached stack.  glibc 2.43 and macOS leave
+the dead thread's memory mapped, the new thread lands elsewhere, and the
+child's first call into R dies with "Wrong thread calling 'Rf_protect'",
+as the fork check in tests/eval.c does there.
+
+A child handler registered with pthread_atfork() clears the record, so
+the first thread to call into R in the child becomes R's thread.  A
+child forked from R's own thread, as parallel::mcfork() does, records
+that thread again, so the check keeps its meaning there.
+
+Instrumentation, not a fix: R itself only forks from its own thread.
+Not for upstream.
+
+diff --git a/src/main/memory.c b/src/main/memory.c
+--- a/src/main/memory.c
++++ b/src/main/memory.c
+@@ -3206,11 +3206,26 @@
+ #ifdef THREADCHECK
+ # if !defined(Win32) && defined(HAVE_PTHREAD)
+ #   include <pthread.h>
+-attribute_hidden void R_check_thread(const char *s)
++static Rboolean main_thread_inited = FALSE;
++static pthread_t main_thread;
++
++/* Fuzzing instrumentation: the harnesses run R on a thread of their own
++   and AFL++'s forkserver forks from another, so a child starts R a new
++   thread, which macOS and glibc 2.43 give a different pthread_t.  The
++   child's first caller becomes R's thread instead. */
++static void forget_main_thread(void)
+ {
+-    static Rboolean main_thread_inited = FALSE;
+-    static pthread_t main_thread;
++    main_thread_inited = FALSE;
++}
++
++attribute_hidden void R_check_thread(const char *s)
++{
+     if (! main_thread_inited) {
++        static Rboolean atfork_registered = FALSE;
++        if (! atfork_registered) {
++            pthread_atfork(NULL, NULL, forget_main_thread);
++            atfork_registered = TRUE;
++        }
+         main_thread = pthread_self();
+         main_thread_inited = TRUE;
+     }
