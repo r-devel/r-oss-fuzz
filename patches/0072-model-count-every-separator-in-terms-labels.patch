@@ -1,0 +1,32 @@
+Size the term label buffer in terms() for every separator, so a term
+starting with the empty symbol no longer writes one byte past it.
+
+Step 5 of termsform() in src/library/stats/src/model.c computed each
+label's length adding one for the ':' separator only when the length so
+far was positive, then filled a variable-length array of that size,
+writing a ':' before every variable but the first.  The empty symbol has
+a zero-length name, so a term starting with it, as in `(`(,) * g, got a
+buffer one byte short and the terminating NUL landed past it (oss-fuzz
+testcase 6138296798085120, formula target, through update.formula()).
+Count each variable as its name plus one byte instead.
+
+Upstream status: r-devel/r-svn PR #527, R Bugzilla 19362 (both
+2026-11-23).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/library/stats/src/model.c
++++ b/src/library/stats/src/model.c
+@@ -2053,9 +2053,9 @@ SEXP termsform(SEXP args)
+ #endif
+ 	for (int i = 1; i <= nvar; i++) {
+ 	    if (GetBit(CAR(call), i)) {
+-		if (l > 0)
+-		    l += 1;
+-		l += (int) strlen(CHAR(STRING_ELT(varnames, i - 1)));
++		/* + 1 for the ':' before the next variable; not conditional
++		   on l > 0, as the empty symbol has a zero-length name */
++		l += strlen(CHAR(STRING_ELT(varnames, i - 1))) + 1;
+ 	    }
+ 	}
+ #ifdef DEBUG_terms
