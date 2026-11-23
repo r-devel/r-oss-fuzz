@@ -1,0 +1,93 @@
+Bound the syntax error message that parse_Rd() builds in yyerror(), so a
+syntax error at a long token cannot write past the stack buffer.
+
+yyerror() in src/library/tools/src/gramRd.y formats "unexpected TEXT
+'<token>'" into the 256-byte ParseErrorMsg with snprintf(), then appended
+", expecting ..." with strcat(), which overflows once the token is about
+240 bytes long: \link[{x}<300 bytes>]{y} in an Rd file kills R.  Append
+with snprintf() into the space left, and copy the file name with
+snprintf() as well, as strncpy() left it unterminated for paths of 255
+bytes or more.  The rd target has not reported this; it is carried ahead
+of time.
+
+Upstream status: r-devel/r-svn PR #523, R Bugzilla 19361 (both
+2026-11-22).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/library/tools/src/gramRd.c
++++ b/src/library/tools/src/gramRd.c
+@@ -4035,19 +4035,21 @@ static void yyerror(const char *s)
+ 			 s1 + sizeof yyunexpected - 1, CHAR(STRING_ELT(yylval, 0)));
+ 	}
+     	if (expecting) {
++	    size_t len = strlen(ParseErrorMsg);
+  	    translated = FALSE;
+     	    for (i = 0; yytname_translations[i]; i += 2) {
+     	    	if (!strcmp(expecting + sizeof yyexpecting - 1, yytname_translations[i])) {
+-    	    	    strcat(ParseErrorMsg, _(yyexpecting));
+-    	    	    strcat(ParseErrorMsg, i/2 < YYENGLISH ? _(yytname_translations[i+1])
+-    	    	                    : yytname_translations[i+1]);
++    	    	    snprintf(ParseErrorMsg + len, PARSE_ERROR_SIZE - len, "%s%s",
++			     _(yyexpecting),
++			     i/2 < YYENGLISH ? _(yytname_translations[i+1])
++			     : yytname_translations[i+1]);
+     	    	    translated = TRUE;
+ 		    break;
+ 		}
+ 	    }
+ 	    if (!translated) {
+-	    	strcat(ParseErrorMsg, _(yyexpecting));
+-	    	strcat(ParseErrorMsg, expecting + sizeof yyexpecting - 1);
++	    	snprintf(ParseErrorMsg + len, PARSE_ERROR_SIZE - len, "%s%s",
++			 _(yyexpecting), expecting + sizeof yyexpecting - 1);
+ 	    }
+ 	}
+     } else if (!strncmp(s, yyunknown, sizeof yyunknown-1)) {
+@@ -4058,7 +4060,7 @@ static void yyerror(const char *s)
+     }
+     filename = findVar(install("filename"), SrcFile);
+     if (isString(filename) && LENGTH(filename))
+-    	strncpy(ParseErrorFilename, CHAR(STRING_ELT(filename, 0)), PARSE_ERROR_SIZE - 1);
++    	snprintf(ParseErrorFilename, PARSE_ERROR_SIZE, "%s", CHAR(STRING_ELT(filename, 0)));
+     else
+         ParseErrorFilename[0] = '\0';
+     if (wCalls) {
+--- a/src/library/tools/src/gramRd.y
++++ b/src/library/tools/src/gramRd.y
+@@ -1470,19 +1470,21 @@ static void yyerror(const char *s)
+ 			 s1 + sizeof yyunexpected - 1, CHAR(STRING_ELT(yylval, 0)));
+ 	}
+     	if (expecting) {
++	    size_t len = strlen(ParseErrorMsg);
+  	    translated = FALSE;
+     	    for (i = 0; yytname_translations[i]; i += 2) {
+     	    	if (!strcmp(expecting + sizeof yyexpecting - 1, yytname_translations[i])) {
+-    	    	    strcat(ParseErrorMsg, _(yyexpecting));
+-    	    	    strcat(ParseErrorMsg, i/2 < YYENGLISH ? _(yytname_translations[i+1])
+-    	    	                    : yytname_translations[i+1]);
++    	    	    snprintf(ParseErrorMsg + len, PARSE_ERROR_SIZE - len, "%s%s",
++			     _(yyexpecting),
++			     i/2 < YYENGLISH ? _(yytname_translations[i+1])
++			     : yytname_translations[i+1]);
+     	    	    translated = TRUE;
+ 		    break;
+ 		}
+ 	    }
+ 	    if (!translated) {
+-	    	strcat(ParseErrorMsg, _(yyexpecting));
+-	    	strcat(ParseErrorMsg, expecting + sizeof yyexpecting - 1);
++	    	snprintf(ParseErrorMsg + len, PARSE_ERROR_SIZE - len, "%s%s",
++			 _(yyexpecting), expecting + sizeof yyexpecting - 1);
+ 	    }
+ 	}
+     } else if (!strncmp(s, yyunknown, sizeof yyunknown-1)) {
+@@ -1493,7 +1495,7 @@ static void yyerror(const char *s)
+     }
+     filename = findVar(install("filename"), SrcFile);
+     if (isString(filename) && LENGTH(filename))
+-    	strncpy(ParseErrorFilename, CHAR(STRING_ELT(filename, 0)), PARSE_ERROR_SIZE - 1);
++    	snprintf(ParseErrorFilename, PARSE_ERROR_SIZE, "%s", CHAR(STRING_ELT(filename, 0)));
+     else
+         ParseErrorFilename[0] = '\0';
+     if (wCalls) {
