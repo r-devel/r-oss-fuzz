@@ -1,0 +1,37 @@
+Make TRE's assert() abort instead of raising an R error.
+
+R's copy of TRE maps assert() to Rf_error() (src/extra/tre/tre-internal.h),
+so that a broken invariant in the regex engine raises "assertion '...'
+failed in executing regexp" instead of ending R.  The harnesses catch and
+discard an R error like any rejected input, so a reachable assertion --
+a bug in TRE, which a stock build, where configure defines NDEBUG, runs
+straight past -- would never be reported.  abort() instead: the
+sanitizer runtime prints where it happened and ClusterFuzz files it under
+that location.
+
+Of the targets, only agrep drives TRE with fuzzed patterns, and it is
+deferred from OSS-Fuzz (DEFERRED_TARGETS in ossfuzz.sh), so this matters
+for ClusterFuzzLite runs and local fuzzing.  Assumes patches/0006, 0072
+and 0073, which fix the assertions known to be reachable; without them
+the agrep target aborts on stored inputs.
+
+Instrumentation, not a fix.  Not for upstream.
+
+diff --git a/src/extra/tre/tre-internal.h b/src/extra/tre/tre-internal.h
+index 7db0ebb489..4dcd661a15 100644
+--- a/src/extra/tre/tre-internal.h
++++ b/src/extra/tre/tre-internal.h
+@@ -37,7 +37,12 @@ extern void Rf_error(const char *str, ...);
+ #ifdef NDEBUG
+ #define R_assert(e) ((void) 0)
+ #else
+-#define R_assert(e) ((e) ? (void) 0 : Rf_error("assertion '%s' failed in executing regexp: file '%s', line %d\n", #e, __FILE__, __LINE__))
++/* The harnesses catch and discard an R error like any rejected input, so a
++   failed TRE invariant would never be reported.  Abort instead: the
++   sanitizer prints where it failed and the report deduplicates on it. */
++#include <stdio.h>
++#include <stdlib.h>
++#define R_assert(e) ((e) ? (void) 0 : (fprintf(stderr, "assertion '%s' failed in executing regexp: file '%s', line %d\n", #e, __FILE__, __LINE__), abort()))
+ #endif /* NDEBUG */
+ 
+ #undef assert

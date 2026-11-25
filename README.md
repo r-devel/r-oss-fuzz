@@ -87,11 +87,12 @@ engine — whose upstream is dormant, so every fix must be hand-patched into R.
 For the same reason no harness drives TRE at all: every regex call in the
 harnesses passes `perl = TRUE` (or `fixed = TRUE` where there is no `perl`
 argument, as in `grepRaw()`), so the PCRE2 engine is what gets fuzzed. TRE's
-known problems — bounded-repeat expansion at compile time, exponential
-backtracking once a back-reference is present, and internal assertions that
-`longjmp` out of `tre_compile()` and leak everything it had allocated — are
-not findings this project pursues. `agrep` is TRE-only, which is why it stays
-deferred; `grep` never reaches TRE and runs on OSS-Fuzz.
+known problems — bounded-repeat expansion at compile time and exponential
+backtracking once a back-reference is present — are not findings this
+project pursues. Its internal assertions are: R turns a failed one into an R
+error, which a harness would discard like any rejected input, so
+`instrumentation/0009` makes it abort. `agrep` is TRE-only, which is why it
+stays deferred; `grep` never reaches TRE and runs on OSS-Fuzz.
 `ossfuzz.sh` implements the split via `DEFERRED_TARGETS`; promoting a target
 to OSS-Fuzz means removing its name from that default list.
 
@@ -260,6 +261,7 @@ changes above are in place. Each header says what it is for. Currently:
 | `0006-sock-listen-on-loopback-only` | R's server sockets bind to 127.0.0.1 instead of every interface, so the listening port the `sockets` target holds while an input runs cannot be reached, or fed input, from another host |
 | `0007-bccompile-accept-base-named-frame-as-base` | the C compiler of `features/0001` treats a frame named like base's package frame as base, as `cmp.R` does once the `eval` harness has rebound `isBaseVar`, so loops with a conditional `break` compile to jumps and calls on literals are folded under either compiler; goes when `features/0001` does |
 | `0008-memory-thread-check-reset-on-fork` | in a forked child, the first thread to call into R becomes the one strict barrier's thread check accepts, so a child of AFL++'s forkserver can run R on the new thread the harness starts for it; macOS and glibc 2.43 give that thread a new `pthread_t`, which the check would otherwise kill ("Wrong thread calling 'Rf_protect'") |
+| `0009-tre-abort-on-failed-assertion` | TRE's `assert()` aborts instead of raising an R error ("assertion ... failed in executing regexp"), which the harnesses would otherwise catch and discard like any rejected input; a failed one is a bug in TRE, which a stock build (where `configure` defines `NDEBUG`) runs straight past. Only the deferred `agrep` target reaches TRE with fuzzed patterns |
 
 Three of these are adapted from the earlier `r-afl` work, which is where
 the two memory-safety ones earned their keep.
