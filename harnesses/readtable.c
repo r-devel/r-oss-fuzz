@@ -24,6 +24,12 @@
 #define FUZZ_MAX_INPUT (1024 * 64)
 #define N_CALLS 20
 
+/* Most cells a padding slot may be handed (see cell_bound).  The cost of
+ * a cell grows with the number of columns: under ASAN, 1M cells took 2 s
+ * as 250 columns and 12 s as 30000, the widest a 64 KiB input allows,
+ * and 4M took 18 s as 30000 columns. */
+#define FUZZ_MAX_CELLS (1024 * 1024)
+
 /* Slot layout:
  *   [0,12)   read.table() and its csv/csv2/delim presets under assorted
  *            separators, quoting, comments, NA strings, fill/flush,
@@ -73,6 +79,61 @@ static const char *const sources[N_CALLS] = {
     "write.csv(d, nullfile(), fileEncoding = \"UTF-16LE\") }",
 };
 
+/* The slots whose reader pads short rows: fill = TRUE, given or by
+ * default (read.csv, read.csv2, read.delim, and read.table() with
+ * blank.lines.skip = FALSE).  Keep in step with sources[]. */
+static const int pads[N_CALLS] = {
+    0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1,     /* [0,12)  readers */
+    0, 0, 0,                                /* [12,15) count.fields() */
+    1, 1, 1, 1, 1,                          /* [15,20) readers into writers */
+};
+
+/*
+ * Upper bound on the cells a padding slot makes of text.  With fill,
+ * read.table() pads every row to the most fields in its first five
+ * lines, so one wide line over many short ones is quadratic in the
+ * input: 43 KB of tabs and carriage returns read as 10574 rows of 4458
+ * columns, 47M cells (oss-fuzz testcase 6363833382535168).
+ *
+ * There are at most as many rows as physical lines, which \n and \r
+ * each end.  A row has at most one field more than the bytes on its
+ * lines that can end a field in some slot: the separators (sep = ""
+ * splits at blanks, and at NBSP in a Latin-1 locale) and the quote
+ * characters, as sep = "" reads "a"b as two fields.  A row spans lines
+ * only inside a quote, and a line without a quote character is then
+ * quoted from end to end, so nothing on it ends a field: the counts on
+ * the lines that hold a quote character bound every row that spans
+ * lines, whatever each slot takes as its quotes.  Slot 11's three
+ * col.names are the one width that is not counted.
+ */
+static size_t cell_bound(const char *text)
+{
+    size_t lines = 1, widest = 0, quoted = 0, ends = 0;
+    int has_quote = 0;
+
+    for (const unsigned char *p = (const unsigned char *)text; ; p++) {
+        if (*p == '\0' || *p == '\n' || *p == '\r') {
+            if (ends > widest)
+                widest = ends;
+            if (has_quote)
+                quoted += ends;
+            if (*p == '\0')
+                break;
+            lines++;
+            ends = 0;
+            has_quote = 0;
+        } else if (*p == ' ' || *p == '\t' || *p == ',' || *p == ';'
+                   || *p == 0xa0) {
+            ends++;
+        } else if (*p == '"' || *p == '\'') {
+            ends++;
+            has_quote = 1;
+        }
+    }
+
+    return lines * (1 + (quoted > widest ? quoted : widest));
+}
+
 static SEXP x_text;
 static SEXP calls[N_CALLS];
 
@@ -109,9 +170,12 @@ int fuzz_target_run(const uint8_t *data, size_t size)
     char buffer[FUZZ_MAX_INPUT];
     memcpy(buffer, data + 1, size - 1);
     buffer[size - 1] = '\0';
+    int slot = data[0] % N_CALLS;
+    if (pads[slot] && cell_bound(buffer) > FUZZ_MAX_CELLS)
+        return 0;
     if (!fuzz_set_string(x_text, buffer))
         return 0;
 
-    fuzz_eval_silent(calls[data[0] % N_CALLS], R_GlobalEnv);
+    fuzz_eval_silent(calls[slot], R_GlobalEnv);
     return 0;
 }
