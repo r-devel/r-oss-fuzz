@@ -1,0 +1,37 @@
+Step past the whole argument of an unknown macro in tools:::permissify(),
+so the rd target stops timing out on deeply nested unknown macros.
+
+parse_Rd(permissive = TRUE) turns each unknown macro and its {} arguments
+into text.  permissify() (src/library/tools/R/parseRd.R) splices the
+argument's elements in between "{" and "}" and then advances by 3, which
+lands inside the spliced elements unless the argument had exactly one.
+The outer loop then permissifies the nested contents again, which is
+quadratic in the nesting depth (204,796 calls for oss-fuzz testcase
+5796296471150592, 741 levels deep), and the inner loop no longer sees an
+argument that follows, whose braces are dropped.
+
+Upstream status: r-devel/r-svn PR #548 (no Bugzilla report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/library/tools/R/parseRd.R
++++ b/src/library/tools/R/parseRd.R
+@@ -229,13 +229,16 @@ permissify <- function(Rd)
+    	    Rd[[i]] <- tagged(Rd[[i]], "TEXT", utils::getSrcref(Rd[[i]]))
+             while (i < length(tags)) {
+ 		if (tags[i+1] == "LIST") {
++		    arg <- permissify(Rd[[i+1]])
+ 		    Rd <- c(Rd[seq_len(i)],
+                             list(tagged("{", "TEXT", utils::getSrcref(Rd[[i+1]]))),
+-                            permissify(Rd[[i+1]]),
++                            arg,
+                             list(tagged("}", "TEXT", utils::getSrcref(Rd[[i+1]]))),
+ 			    Rd[seq_along(Rd)[-seq_len(i+1)]])
+ 		    tags <- RdTags(Rd)
+-		    i <- i+3
++		    ## c() spliced the argument's elements in: step to its
++		    ## closing brace, past what permissify() has just done
++		    i <- i + 2L + length(arg)
+ 		} else if (tags[i+1] == "TEXT" && grepl("^ *$", Rd[[i+1]]))
+ 		    i <- i + 1
+ 		else
