@@ -15,11 +15,10 @@ but the allocation happens first:
 
 DEFLATE expands by at most 1032:1, so cap the initial buffer at that
 multiple of the input; a truthful ISIZE is always within the cap and
-output of 4 GB or more (where ISIZE has wrapped) is still reached by
-the existing doubling on LIBDEFLATE_INSUFFICIENT_SPACE.  Also require
-the 18 bytes of a minimal gzip member before reading the magic and the
-trailer, so a shorter input is handed to libdeflate instead of read past
-its end.
+output of 4 GB or more (where ISIZE has wrapped) is reached by the
+doubling on LIBDEFLATE_INSUFFICIENT_SPACE.  The size is now read once,
+before the loop: trunk re-reads it on every pass, so the doubling never
+takes effect and an ISIZE below the real size loops forever.
 
 Found by OSS-Fuzz (testcase 5726025607348224).  The same input hit the
 zlib path's infinite loop before the fuzz image gained libdeflate; that
@@ -27,25 +26,21 @@ fix is patch 0022 (r-svn PR #357, Bugzilla 19200).
 
 Upstream status: r-devel/r-svn PR #358 (no Bugzilla report yet); its
 regression test in tests/reg-tests-1e.R is left out here so this carry
-patch does not go stale with that file.
+patch does not go stale with that file.  PR #358's other half, requiring
+the 18 bytes of a minimal gzip member before reading the trailer, landed
+in r90983 (PR#19332), so this patch was rebased onto it.
 Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
 it as already-applied in the meantime, which is harmless).
 
-diff --git a/src/main/connections.c b/src/main/connections.c
-index a4905eeecb..e4a6f2fd88 100644
 --- a/src/main/connections.c
 +++ b/src/main/connections.c
-@@ -7291,16 +7291,26 @@ do_memDecompress(SEXP call, SEXP op, SEXP args, SEXP env)
-         enum libdeflate_result res;
- 	Bytef *buf, *p = (Bytef *)RAW(from);
+@@ -7335,15 +7335,23 @@ do_memDecompress(SEXP call, SEXP op, SEXP args, SEXP e
  
--	if (p[0] == 0x1f && p[1] == 0x8b) { // in-memory gzip file
+ 	// in-memory gzip file: at least a 10-byte header and an 8-byte trailer
+ 	if (inlen >= 18 && p[0] == 0x1f && p[1] == 0x8b) {
 -	    while(1) {
 -		outlen = get_unaligned_le32(&p[inlen - 4]);
 -		if (outlen == 0) outlen = 1;
-+	/* a gzip member is at least a 10-byte header plus the 8-byte
-+	   trailer; anything shorter is left to libdeflate to reject */
-+	if (inlen >= 18 && p[0] == 0x1f && p[1] == 0x8b) { // in-memory gzip file
 +	    /* The trailer's ISIZE is the uncompressed length mod 2^32, but
 +	       it is part of the input and cannot be trusted: a 1 KB
 +	       stream can claim 4 GB and that is allocated before a byte
