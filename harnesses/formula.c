@@ -31,6 +31,9 @@
  *    The model slot runs only when every name in the input is in
  *    eval_names (operators, a few pure functions, and the columns of
  *    the fixed data frame), so the input can call nothing else.
+ *  - The data's ten rows do not bound what those calls build, so the
+ *    model slot bounds `:`, interaction() and the columns of
+ *    model.matrix() itself (see model_source).
  */
 
 #include <math.h>
@@ -125,18 +128,75 @@ local({
 )";
 
 /* [2] model.frame() and model.matrix() over the fixed data: contrasts,
- * interactions of factors with matrices, na.action, zero-row data. */
+ * interactions of factors with matrices, na.action, zero-row data.
+ *
+ * The data has ten rows, but a few bytes of the input can make far more
+ * work than that.  `:` builds a sequence of any length (oss-fuzz testcase
+ * 5546078118936576: 7022242 elements inside interaction(), 9.6 s in
+ * release R), and on two factors, like interaction(), a factor whose
+ * levels multiply with every argument: 14 copies of the three-level f
+ * took 13 s.  The variables are evaluated in the formula's environment,
+ * where both are bounded versions, to 1000 elements or levels (a
+ * factor's contrast matrix has its levels squared in cells); `:` is
+ * bounded on the first element of each argument, as in the eval target.
+ * model.matrix() then gives each term the product of its variables'
+ * widths in columns, a factor's levels or a matrix's columns (seven
+ * factor() variables in one term made 944785), so the slot stops before
+ * it past 4096 columns. */
 static const char model_source[] = R"(
 local({
     contrasts <- c("contr.treatment", "contr.sum", "contr.helmert",
                    "contr.SAS", "contr.poly")
     actions <- list(na.omit, na.exclude, na.pass, na.fail)
+    bounded <- new.env(parent = globalenv())
+    bounded[[":"]] <- function(from, to) {
+        if (is.factor(from) && is.factor(to)) {
+            if (nlevels(from) * nlevels(to) > 1000)
+                stop("too many levels for the formula target")
+        } else if (length(from) >= 1L && length(to) >= 1L) {
+            f <- as.double(from[[1L]])
+            t <- as.double(to[[1L]])
+            if (is.finite(f) && is.finite(t) && abs(t - f) >= 1000)
+                stop("sequence too long for the formula target")
+        }
+        base::`:`(from, to)
+    }
+    bounded$interaction <- function(...) {
+        args <- list(...)
+        if (length(args) == 1L && is.list(args[[1L]]))
+            args <- args[[1L]]
+        n <- 1
+        for (a in args)
+            n <- n * nlevels(as.factor(a))
+        if (n > 1000)
+            stop("too many levels for the formula target")
+        base::interaction(...)
+    }
     function(e, v, fo, data) {
         e <- fo(e)
+        environment(e) <- bounded
         d <- data[seq_len(v %% 11L), , drop = FALSE]
         v <- v %/% 11L
         mf <- model.frame(e, data = d, na.action = actions[[v %% 4L + 1L]],
                           drop.unused.levels = v %/% 4L %% 2L == 1L)
+
+        ## model.matrix() turns a logical variable into a factor with
+        ## levels FALSE and TRUE, and a character one into a factor of
+        ## its values.
+        width <- vapply(mf, NCOL, 0L)
+        width[vapply(mf, is.logical, NA)] <- 2L
+        is_character <- vapply(mf, is.character, NA)
+        width[is_character] <- lengths(lapply(mf[is_character], unique))
+        is_factor <- vapply(mf, is.factor, NA)
+        width[is_factor] <- vapply(mf[is_factor], nlevels, 0L)
+        factors <- attr(attr(mf, "terms"), "factors")
+        if (length(factors)) {
+            columns <- apply(factors != 0, 2L, function(k)
+                prod(width[rownames(factors)[k]]))
+            if (sum(columns) > 4096)
+                stop("too many columns for the formula target")
+        }
+
         ct <- contrasts[v %/% 8L %% 5L + 1L]
         model.matrix(e, mf, contrasts.arg = list(f = ct, g = ct, o = ct))
         model.response(mf)
