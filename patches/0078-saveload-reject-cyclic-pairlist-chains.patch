@@ -1,0 +1,49 @@
+Reject a cyclic pairlist chain in RestoreToEnv(), so the load target
+stops timing out on pre-1.0 save files whose CDR points back into the
+chain.
+
+The pre-1.0 formats (magic 1971/1972) store every pointer as a node offset,
+so a CDR can name its own node or an earlier one.  RestoreToEnv()
+(src/main/saveload.c) checks each node of the loaded chain since PR#19238
+but walks it until R_NilValue, which a cycle never reaches; a tag of
+R_MissingArg (offset -4) is a symbol and passes the check.  Detect the
+cycle with a second pointer that moves at half the speed (oss-fuzz
+testcase 6565685504049152: a 56-byte input with one self-referencing node).
+
+Upstream status: r-devel/r-svn PR #549 (no Bugzilla report yet).
+Delete this patch once the fix lands in R trunk (ossfuzz.sh will report
+it as already-applied in the meantime, which is harmless).
+
+--- a/src/main/saveload.c
++++ b/src/main/saveload.c
+@@ -2100,7 +2100,7 @@ attribute_hidden SEXP do_save(SEXP call, SEXP op, SEXP args, SEXP env)
+ 
+ static SEXP RestoreToEnv(SEXP ans, SEXP aenv)
+ {
+-    SEXP a, names, obj;
++    SEXP a, slow, names, obj;
+     int cnt = 0;
+     /* Store the components of the list in aenv.  We either replace
+      * the existing objects in aenv or establish new bindings for
+@@ -2131,13 +2131,20 @@ static SEXP RestoreToEnv(SEXP ans, SEXP aenv)
+ 	error(_("loaded data is not in pair list form"));
+ 
+     PROTECT(ans);
+-    a = ans;
++    a = slow = ans;
+     while (a != R_NilValue) {
+ 	/* a hand-crafted file can splice any object into the chain */
+ 	if (TYPEOF(a) != LISTSXP || TYPEOF(TAG(a)) != SYMSXP)
+ 	    error(_("loaded data is not in pair list form"));
+ 	a = CDR(a);
+ 	cnt++;
++	/* and the pre-1.0 formats can point a CDR back into the chain:
++	   'slow' follows at half the speed, so a cycle makes them meet */
++	if (cnt % 2 == 0) {
++	    slow = CDR(slow);
++	    if (a == slow)
++		error(_("loaded data is not in pair list form"));
++	}
+     }
+     PROTECT(names = allocVector(STRSXP, cnt));
+     cnt = 0;
